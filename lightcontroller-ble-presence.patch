@@ -73,7 +73,7 @@ diff -ruN -x .pio -x secrets.ini -x config.h orig/src/StatusReporter.h work/src/
 diff -ruN -x .pio -x secrets.ini -x config.h orig/src/ble_presence.cpp work/src/ble_presence.cpp
 --- orig/src/ble_presence.cpp	1970-01-01 01:00:00.000000000 +0100
 +++ work/src/ble_presence.cpp	2026-10-27 01:36:45.719111600 +0100
-@@ -0,0 +1,589 @@
+@@ -0,0 +1,594 @@
 +#include "ble_presence.h"
 +
 +#include <NimBLEDevice.h>
@@ -545,7 +545,7 @@ diff -ruN -x .pio -x secrets.ini -x config.h orig/src/ble_presence.cpp work/src/
 +    // Never let the BLE controller put the board in a boot loop: after a panic or
 +    // watchdog reset the scanner stays off until the next clean boot.
 +    const esp_reset_reason_t why = esp_reset_reason();
-+    if (why == ESP_RST_PANIC || why == ESP_RST_TASK_WDT || why == ESP_RST_INT_WDT || why == ESP_RST_WDT)
++    if (why == ESP_RST_PANIC || why == ESP_RST_BROWNOUT || why == ESP_RST_TASK_WDT || why == ESP_RST_INT_WDT || why == ESP_RST_WDT)
 +    {
 +        Serial.println("[BLE] previous reset was a crash, scanner disabled this boot");
 +        return;
@@ -555,7 +555,12 @@ diff -ruN -x .pio -x secrets.ini -x config.h orig/src/ble_presence.cpp work/src/
 +        Serial.println("[BLE] not enough heap, scanner disabled");
 +        return;
 +    }
-+    NimBLEDevice::init("");
++    if (!NimBLEDevice::init(""))
++    {
++        Serial.printf("[BLE] init failed, scanner disabled (free heap %u)\n", ESP.getFreeHeap());
++        NimBLEDevice::deinit(true);
++        return;
++    }
 +    g_started = true;
 +    if (g_enabled)
 +        startScan();
