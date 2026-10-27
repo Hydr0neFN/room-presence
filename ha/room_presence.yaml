@@ -968,15 +968,22 @@ automation:
     mode: single
   - id: rp_zone_to_mqtt
     alias: "RP publish zone to MQTT (history log)"
-    description: Retained presence/zone/state on every zone change and every minute; the nl-pi zone-log service writes it to CSV.
+    description: >-
+      Retained presence/zone/state every 10 s and on every change of zone / PC lock / radar / the work desk light / the light bar;
+      the nl-pi zone-log service writes it to CSV (schema v2) together with the weak zone labels derived from it. wd_light_ts and
+      lightbar_ts are the epoch seconds of the last state change of light.channel_b / the light bar.
     triggers:
       - trigger: state
         entity_id:
           - sensor.yui_room_zone
           - sensor.rp_fp_zone
           - binary_sensor.yui_home
+          - binary_sensor.rp_pc_locked
+          - binary_sensor.kitchenradar_presence
+          - light.channel_b
+          - light.monitor_light_bar_light_bar
       - trigger: time_pattern
-        minutes: "/1"
+        seconds: "/10"
     actions:
       - action: mqtt.publish
         data:
@@ -985,8 +992,16 @@ automation:
           payload: >-
             {{ {'zone': states('sensor.yui_room_zone'), 'fp': states('sensor.rp_fp_zone'),
                 'home': states('binary_sensor.yui_home'), 'pc_idle': states('sensor.rp_pc_idle'),
+                'pc_online': states('binary_sensor.rp_pc_online'), 'pc_locked': states('binary_sensor.rp_pc_locked'),
                 'radar': states('binary_sensor.kitchenradar_presence'),
-                'radar_cm': states('sensor.kitchenradar_detection_distance')} | tojson }}
+                'radar_cm': states('sensor.kitchenradar_detection_distance'),
+                'wd_light': states('light.channel_b'),
+                'wd_light_ts': (as_timestamp(states['light.channel_b'].last_changed) if states['light.channel_b'] is not none else 0),
+                'lightbar': states('light.monitor_light_bar_light_bar'),
+                'lightbar_ts': (as_timestamp(states['light.monitor_light_bar_light_bar'].last_changed) if states['light.monitor_light_bar_light_bar'] is not none else 0),
+                'link_kitchenradar': states('sensor.rp_link_kitchenradar_motion'),
+                'link_neopixel': states('sensor.rp_link_neopixel_motion'),
+                'link_kitchenrssi': states('sensor.rp_link_kitchenrssi_motion')} | tojson }}
     mode: queued
   - id: rp_pc_desk_occupied_light_bar_on
     alias: "Room presence: PC desk occupied -> light bar on (warm)"
