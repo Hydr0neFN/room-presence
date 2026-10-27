@@ -1,0 +1,53 @@
+--- /c/Users/Ruanyouyi/Rpi4/room-presence/lc-port/before-csi/src/main.cpp	2026-10-27 12:20:58.353930900 +0100
++++ src/main.cpp	2026-10-27 12:27:38.824555400 +0100
+@@ -185,6 +185,14 @@
+     blepresence::setup([](const char *t, const char *p, bool r) { return status->publishRaw(t, p, r); });
+   }
+   blepresence::loop();
++  // WiFi CSI sensing (node "workdesk"), started 15 s after BLE so the two do not
++  // allocate at the same moment. The free-heap guard is CSI_MIN_FREE_HEAP.
++  static bool csiStarted = false;
++  if (!csiStarted && WiFi.status() == WL_CONNECTED && millis() > 45000) {
++    csiStarted = true;
++    csipresence::setup(BLE_NODE_NAME, [](const char *t, const char *p, bool r) { return status->publishRaw(t, p, r); });
++  }
++  if (csiStarted) csipresence::loop();
+ #endif
+   updateStatusLed();
+ }
+--- /c/Users/Ruanyouyi/Rpi4/room-presence/lc-port/before-csi/src/StatusReporter.h	2026-10-27 12:20:58.355439800 +0100
++++ src/StatusReporter.h	2026-10-27 12:21:09.767261700 +0100
+@@ -8,6 +8,7 @@
+   #include <WiFi.h>
+   #include <PubSubClient.h>
+   #include "ble_presence.h"
++  #include "csi_presence.h"
+ #endif
+ 
+ // ============================================================================
+@@ -94,6 +95,7 @@
+       _mqtt.publish(MQTT_BASE_TOPIC "/online", "1", true);
+       _mqtt.subscribe(MQTT_BASE_TOPIC "/cmd/voltage");   // net PD-voltage control
+       blepresence::subscribe([](const char *t) { _self->_mqtt.subscribe(t); });
++      csipresence::subscribe([](const char *t) { _self->_mqtt.subscribe(t); });
+       WEBLOG("MQTT connected to %s:%d", MQTT_HOST, MQTT_PORT);
+     }
+   }
+@@ -102,6 +104,7 @@
+   // nominal volts 5/9/12/15/20. Triggers the registered voltage handler, which
+   // persists to NVS and sheds load during the switch.
+   static void mqttCallback(char *topic, byte *payload, unsigned int len) {
++    if (csipresence::onMessage(topic, payload, len)) return;   // presence/<node>/cmd csi_* (before BLE)
+     if (blepresence::onMessage(topic, payload, len)) return;   // presence/... topics
+     if (!_self || !_self->_voltHandler) return;
+     char b[8] = {0};
+--- /c/Users/Ruanyouyi/Rpi4/room-presence/lc-port/before-csi/platformio.ini	2026-10-27 12:20:58.393612100 +0100
++++ platformio.ini	2026-10-27 12:21:09.768265200 +0100
+@@ -32,6 +32,7 @@
+     ; BLE presence (room-presence project): node name, publisher API, passive-only NimBLE
+     -D BLE_PUBLISH_FN_API
+     -D BLE_NODE_NAME=\"workdesk\"
++    -D CSI_MIN_FREE_HEAP=42000
+     -D CONFIG_BT_NIMBLE_ROLE_CENTRAL_DISABLED
+     -D CONFIG_BT_NIMBLE_ROLE_PERIPHERAL_DISABLED
+     -D CONFIG_BT_NIMBLE_ROLE_BROADCASTER_DISABLED
