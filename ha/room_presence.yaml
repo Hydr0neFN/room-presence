@@ -31,6 +31,13 @@ input_number:
     step: 1
     unit_of_measurement: dB
     initial: 6
+  rp_fp_hysteresis:
+    name: Room presence - fingerprint switch hysteresis
+    min: 0
+    max: 10
+    step: 0.5
+    unit_of_measurement: dB
+    initial: 2.5
   rp_min_rssi:
     name: Room presence - weakest BLE signal that still counts
     min: -100
@@ -115,6 +122,39 @@ mqtt:
       unit_of_measurement: B
       expire_after: 30
       entity_category: diagnostic
+    - name: "RP nlpi apple best"
+      unique_id: rp_nlpi_apple_best
+      state_topic: "presence/nlpi/apple"
+      value_template: "{{ value_json.apple_best }}"
+      unit_of_measurement: dBm
+      expire_after: 30
+    - name: "RP nlpi apple n"
+      unique_id: rp_nlpi_apple_n
+      state_topic: "presence/nlpi/apple"
+      value_template: "{{ value_json.apple_n }}"
+      expire_after: 30
+    - name: "RP nlpi irk avg"
+      unique_id: rp_nlpi_irk_avg
+      state_topic: "presence/nlpi/apple"
+      value_template: "{{ value_json.irk[0].avg if value_json.irk | length > 0 else -127 }}"
+      unit_of_measurement: dBm
+      expire_after: 30
+    - name: "RP nlpi irk n"
+      unique_id: rp_nlpi_irk_n
+      state_topic: "presence/nlpi/apple"
+      value_template: "{{ value_json.irk[0].n if value_json.irk | length > 0 else 0 }}"
+      expire_after: 30
+    - name: "RP nlpi irk loaded"
+      unique_id: rp_nlpi_irk_loaded
+      state_topic: "presence/nlpi/apple"
+      value_template: "{{ value_json.irk_n }}"
+      expire_after: 30
+    - name: "RP fingerprints"
+      unique_id: rp_fingerprints
+      state_topic: "presence/config/fingerprints"
+      value_template: "{{ value_json.ts }}"
+      json_attributes_topic: "presence/config/fingerprints"
+      json_attributes_template: "{{ {'nodes': value_json.nodes, 'zones': value_json.zones} | tojson }}"
   binary_sensor:
     - name: "RP PC locked"
       unique_id: rp_pc_locked
@@ -154,6 +194,37 @@ template:
             {{ states('sensor.rp_workdesk_apple_best') | float(-127) }}
           {% else %}-127{% endif %}
 
+      - name: "RP nlpi signal"
+        unique_id: rp_nlpi_signal
+        unit_of_measurement: dBm
+        state: >
+          {% if states('sensor.rp_nlpi_irk_loaded') | int(0) > 0 %}
+            {{ states('sensor.rp_nlpi_irk_avg') | float(-127) if states('sensor.rp_nlpi_irk_n') | int(0) > 0 else -127 }}
+          {% elif states('sensor.rp_nlpi_apple_n') | int(0) > 0 %}
+            {{ states('sensor.rp_nlpi_apple_best') | float(-127) }}
+          {% else %}-127{% endif %}
+
+      # Nearest-fingerprint zone (written by calibrate.py). RMS distance in dB over
+      # all calibrated nodes; unheard nodes count as -100. 'none' until calibrated.
+      - name: "RP fp zone"
+        unique_id: rp_fp_zone
+        state: >
+          {% set nodes = state_attr('sensor.rp_fingerprints', 'nodes') or [] %}
+          {% set zones = state_attr('sensor.rp_fingerprints', 'zones') or {} %}
+          {% set prev = this.state | default('none') if this is defined else 'none' %}
+          {% set ns = namespace(best='none', bd=999, pd=999) %}
+          {% for z, f in zones.items() %}
+            {% set t = namespace(d=0) %}
+            {% for n in nodes %}
+              {% set sg = [states('sensor.rp_' ~ n ~ '_signal') | float(-127), -100] | max %}
+              {% set t.d = t.d + (sg - (f[n] | float(-100))) ** 2 %}
+            {% endfor %}
+            {% set r = (t.d / ([nodes | length, 1] | max)) ** 0.5 %}
+            {% if r < ns.bd %}{% set ns.bd = r %}{% set ns.best = z %}{% endif %}
+            {% if z == prev %}{% set ns.pd = r %}{% endif %}
+          {% endfor %}
+          {% set h = states('input_number.rp_fp_hysteresis') | float(2.5) %}
+          {{ prev if prev in zones and ns.pd - ns.bd < h else ns.best }}
       - name: "Yui room zone"
         unique_id: yui_room_zone
         icon: mdi:map-marker-radius
@@ -166,12 +237,14 @@ template:
                    < states('input_number.rp_kitchen_max_cm') | float(250) %}
           {% set a = states('sensor.rp_pcdesk_signal') | float(-127) %}
           {% set b = states('sensor.rp_workdesk_signal') | float(-127) %}
+          {% set c = states('sensor.rp_nlpi_signal') | float(-127) %}
           {% set h = states('input_number.rp_hysteresis_db') | float(6) %}
           {% set floor = states('input_number.rp_min_rssi') | float(-90) %}
           {% set prev = this.state | default('unknown') if this is defined else 'unknown' %}
           {% if pc_active %}pc_desk
           {% elif kitchen %}kitchen
-          {% elif [a, b] | max < floor %}away_or_elsewhere
+          {% elif [a, b, c] | max < floor %}away_or_elsewhere
+          {% elif states('sensor.rp_fp_zone') not in ['none', 'unknown', 'unavailable'] %}{{ states('sensor.rp_fp_zone') }}
           {% elif prev == 'pc_desk' %}{{ 'work_desk' if b > a + h else 'pc_desk' }}
           {% elif prev == 'work_desk' %}{{ 'pc_desk' if a > b + h else 'work_desk' }}
           {% else %}{{ 'pc_desk' if a >= b else 'work_desk' }}{% endif %}
@@ -199,6 +272,12 @@ template:
         state: "{{ is_state('sensor.yui_room_zone', 'pc_desk') }}"
         delay_on: "00:00:05"
         delay_off: "00:00:30"
+      - name: "Room zone bed"
+        unique_id: room_zone_bed
+        device_class: occupancy
+        state: "{{ is_state('sensor.yui_room_zone', 'bed') }}"
+        delay_on: "00:00:10"
+        delay_off: "00:01:00"
       - name: "Room zone away"
         unique_id: room_zone_away
         state: "{{ is_state('sensor.yui_room_zone', 'away_or_elsewhere') }}"

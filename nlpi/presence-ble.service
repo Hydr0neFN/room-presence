@@ -1,0 +1,15 @@
+[Unit]
+Description=BLE presence scanner (nl-pi onboard Bluetooth -> MQTT presence/nlpi/apple)
+After=bluetooth.service network-online.target mosquitto.service
+Wants=bluetooth.service
+
+[Service]
+EnvironmentFile=/etc/presence-ble.env
+ExecStart=/usr/bin/python3 /opt/presence-ble/nlpi_ble.py
+Restart=always
+RestartSec=10
+# Low priority: this host also runs Home Assistant and the broker.
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

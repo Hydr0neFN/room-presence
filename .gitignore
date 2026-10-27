@@ -2,3 +2,4 @@ pc-idle/mqtt-pass.local
 firmware/
 rollback/
 build-baseline/
+fingerprints.json
