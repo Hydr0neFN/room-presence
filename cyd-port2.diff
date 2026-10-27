@@ -1,0 +1,178 @@
+--- /c/Users/Ruanyouyi/Documents/PlatformIO/Projects/NLDeskCYD/platformio.ini	2026-09-27 01:19:10.282608400 +0200
++++ platformio.ini	2026-10-27 12:50:37.677971100 +0100
+@@ -14,7 +14,7 @@
+ extra_configs = secrets.ini
+ 
+ [env]
+-platform = espressif32
++platform = espressif32@7.1.0
+ board = esp32dev
+ framework = arduino
+ monitor_speed = 115200
+@@ -26,7 +26,20 @@
+     https://github.com/PaulStoffregen/XPT2046_Touchscreen.git#v1.4
+     lvgl/lvgl@9.5.0
+     knolleary/PubSubClient@^2.8
++    h2zero/NimBLE-Arduino@^2.3.0
+ build_flags =
++    ; BLE presence scanner (src/ble_presence.cpp, room-presence project): node "cyd",
++    ; publisher-fn API, NimBLE trimmed to a passive observer.
++    -D BLE_PUBLISH_FN_API
++    -D BLE_NODE_NAME=\"cyd\"
++    -D CONFIG_BT_NIMBLE_ROLE_CENTRAL_DISABLED
++    -D CONFIG_BT_NIMBLE_ROLE_PERIPHERAL_DISABLED
++    -D CONFIG_BT_NIMBLE_ROLE_BROADCASTER_DISABLED
++    -D CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
++    -D CONFIG_BT_NIMBLE_MSYS1_BLOCK_COUNT=6
++    -D BLE_MIN_FREE_HEAP=18000
++    -D CONFIG_BT_NIMBLE_LOG_LEVEL=5
++    -D CONFIG_NIMBLE_CPP_LOG_LEVEL=0
+     -D LV_CONF_INCLUDE_SIMPLE
+     -D LV_LVGL_H_INCLUDE_SIMPLE
+     -I include
+--- /c/Users/Ruanyouyi/Documents/PlatformIO/Projects/NLDeskCYD/src/main.cpp	2026-09-30 15:45:47.795721400 +0200
++++ src/main.cpp	2026-10-27 12:50:56.064062500 +0100
+@@ -4,6 +4,9 @@
+ #include <XPT2046_Touchscreen.h>
+ #include <lvgl.h>
+ #include <Preferences.h>
++#ifdef BLE_NODE_NAME
++#include <esp_bt.h>
++#endif
+ 
+ #include "config.h"
+ #include "net.h"
+@@ -22,7 +25,8 @@
+ static SPIClass touchscreenSpi = SPIClass(VSPI);
+ static XPT2046_Touchscreen touchscreen(XPT2046_CS, XPT2046_IRQ);
+ 
+-static constexpr int DRAW_BUF_LINES = 64;
++// 24 lines = 15 KB static (was 64 = 40 KB); the freed RAM pays for the BLE scanner.
++static constexpr int DRAW_BUF_LINES = 24;
+ // LVGL 9 asserts on an unaligned draw buffer and halts in setup().
+ static uint16_t draw_buf[320 * DRAW_BUF_LINES] __attribute__((aligned(4)));
+ 
+@@ -167,6 +171,13 @@
+   Serial.begin(115200);
+   delay(200);
+   Serial.println("NLDeskCYD boot");
++#ifdef BLE_NODE_NAME
++  // Linking NimBLE stops the Arduino core releasing the BT memory at start-up; hand the
++  // classic-BT half back now, before LVGL and WiFi fragment the heap.
++  Serial.printf("heap before bt release %u\n", ESP.getFreeHeap());
++  esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
++  Serial.printf("heap after classic release %u\n", ESP.getFreeHeap());
++#endif
+ 
+   net_start();  // own task, pinned to core 0
+ 
+--- /c/Users/Ruanyouyi/Documents/PlatformIO/Projects/NLDeskCYD/src/net.cpp	2026-09-27 14:30:42.016837400 +0200
++++ src/net.cpp	2026-10-27 12:50:41.513134700 +0100
+@@ -3,6 +3,8 @@
+ #include <ArduinoOTA.h>
+ #include <PubSubClient.h>
+ #include <WiFi.h>
++
++#include "ble_presence.h"
+ #include <math.h>
+ #include <time.h>
+ 
+@@ -276,6 +278,7 @@
+ }
+ 
+ static void on_message(char *topic, uint8_t *payload, unsigned int len) {
++  if (blepresence::onMessage(topic, payload, len)) return;  // presence/... (IRK config, cmd)
+   static constexpr size_t BASE_LEN = sizeof(TOPIC_BASE) - 1;
+   static constexpr char HIST[] = "hist/";
+   if (strncmp(topic, TOPIC_BASE, BASE_LEN) != 0) return;
+@@ -394,6 +397,7 @@
+   s_mqtt.subscribe(TOPIC_BASE "weather", 1);
+   s_mqtt.subscribe(TOPIC_BASE "forecast", 1);
+   s_mqtt.subscribe(TOPIC_PANEL "bench", 0);
++  blepresence::subscribe([](const char *t) { s_mqtt.subscribe(t); });
+   return true;
+ }
+ 
+@@ -403,6 +407,12 @@
+   portEXIT_CRITICAL(&s_mux);
+ }
+ 
++// Stop/resume the BLE scanner through its own command path ("off"/"on" on presence/cyd/cmd).
++static void ble_scan_pause(bool pause) {
++  const char *cmd = pause ? "off" : "on";
++  blepresence::onMessage("presence/" BLE_NODE_NAME "/cmd", (const uint8_t *)cmd, strlen(cmd));
++}
++
+ static void setup_ota() {
+   ArduinoOTA.setHostname(OTA_HOSTNAME);
+   ArduinoOTA.setPassword(OTA_PASSWORD);
+@@ -410,6 +420,7 @@
+     // The OTA erases ~1.2 MB of flash up front, stalling both cores for
+     // seconds; the 5 s loop watchdog (main.cpp) would reboot mid-upload.
+     disableLoopWDT();
++    ble_scan_pause(true);  // radio + heap are needed for the upload
+     portENTER_CRITICAL(&s_mux);
+     s_model.ota_active = true;
+     s_model.ota_percent = 0;
+@@ -427,6 +438,7 @@
+     s_model.ota_active = false;
+     portEXIT_CRITICAL(&s_mux);
+     enableLoopWDT();
++    ble_scan_pause(false);
+   });
+   ArduinoOTA.begin();
+ }
+@@ -461,7 +473,8 @@
+ static void net_task(void *) {
+   WiFi.mode(WIFI_STA);
+   WiFi.setHostname(OTA_HOSTNAME);
+-  WiFi.setSleep(false);  // modem sleep adds 100+ ms to every command
++  // WiFi/BT coexistence aborts with modem sleep fully off; MIN_MODEM costs a few ms per command.
++  WiFi.setSleep(WIFI_PS_MIN_MODEM);
+   WiFi.setAutoReconnect(true);
+   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+ 
+@@ -471,7 +484,7 @@
+   s_mqtt.setCallback(on_message);
+   s_mqtt.setBufferSize(1280);  // history payloads ~450 B, discovery ~300 B
+   s_mqtt.setSocketTimeout(5);
+-  s_mqtt.setKeepAlive(30);
++  s_mqtt.setKeepAlive(60);  // BLE coexistence can stall WiFi for seconds
+ 
+   bool ota_started = false;
+   unsigned long next_try = 0, next_rssi = 0, next_perf = 0, next_ldr = 0;
+@@ -495,6 +508,15 @@
+         }
+       } else {
+         s_mqtt.loop();
++        // BLE presence scanner (node "cyd"): start once WiFi + MQTT have been up for a while.
++        static bool ble_started = false;
++        if (!ble_started && now > 30000) {
++          ble_started = true;
++          blepresence::setup([](const char *t, const char *p, bool r) {
++            return s_mqtt.connected() && s_mqtt.publish(t, p, r);
++          });
++        }
++        blepresence::loop();
+         Cmd c;
+         while (xQueueReceive(s_cmd_queue, &c, 0) == pdTRUE) {
+           const char *t = c.target == CmdTarget::BASIL ? TOPIC_CMD_BASIL : TOPIC_CMD_LIGHTBAR;
+@@ -516,14 +538,14 @@
+         }
+         if ((long)(now - next_perf) >= 0) {
+           next_perf = now + 10000;
+-          char p[128];
++          char p[192];
+           portENTER_CRITICAL(&s_mux);
+-          snprintf(p, sizeof(p), "{\"fps\":%.1f,\"frame_ms\":%.1f,\"flush_ms\":%.1f,\"sky_fps\":%d,\"heap\":%u}",
++          snprintf(p, sizeof(p), "{\"fps\":%.1f,\"frame_ms\":%.1f,\"flush_ms\":%.1f,\"sky_fps\":%d,\"heap\":%u,\"hmin\":0,\"hblk\":0}",
+                    s_perf_fps, s_perf_frame_ms, s_perf_flush_ms, s_perf_sky, 0u);
+           portEXIT_CRITICAL(&s_mux);
+           // heap read outside the critical section
+-          char *h = strstr(p, "\"heap\":0}");
+-          if (h) snprintf(h, sizeof(p) - (h - p), "\"heap\":%u}", ESP.getFreeHeap());
++          char *h = strstr(p, "\"heap\":0,");
++          if (h) snprintf(h, sizeof(p) - (h - p), "\"heap\":%u,\"hmin\":%u,\"hblk\":%u}", ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap());
+           s_mqtt.publish(TOPIC_PANEL "perf", p, false);
+         }
+         if ((long)(now - next_rssi) >= 0) {

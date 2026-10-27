@@ -132,7 +132,7 @@ def main():
     ap.add_argument("--show", action="store_true")
     ap.add_argument("--feat-note", action="store_true", help="with --show: also print the stored features as a table")
     ap.add_argument("--clear", choices=ZONES)
-    ap.add_argument("--require", default="pcdesk,workdesk,nlpi", help="nodes expected to report")
+    ap.add_argument("--require", default="pcdesk,workdesk,nlpi,cyd", help="nodes expected to report (kitchen is optional)")
     a = ap.parse_args()
     fps = load()
     if a.show:

@@ -5,8 +5,9 @@
 #   presence/pcdesk/idle        PC idle seconds   (pc_idle.py, Windows task PresencePcIdle)
 #   presence/pcdesk/apple       BLE RSSI summary  (lightbar2mqtt firmware, anchor at the PC desk)
 #   presence/workdesk/apple     BLE RSSI summary  (LightController firmware, anchor at the work desk)
-#   presence/kitchen/apple      BLE RSSI summary  (FUTURE node `kitchen`; unavailable until flashed)
-#   presence/<pcdesk|workdesk|kitchen>/csi  WiFi CSI summary JSON ~2 Hz (motion/still per-mille, ok=0 = no usable window)
+#   presence/kitchen/apple      BLE RSSI summary  (node `kitchen`: powermon C3 above the kitchen counter)
+#   presence/cyd/apple          BLE RSSI summary  (NLDeskCYD panel on top of the PC desk, node `cyd`)
+#   presence/<pcdesk|workdesk|kitchen|cyd>/csi  WiFi CSI summary JSON ~2 Hz (motion/still per-mille, ok=0 = no usable window)
 #   binary_sensor.kitchenradar_presence + sensor.kitchenradar_detection_distance (LD2410, kitchen)
 #   sensor.chu_fang_kitchenradar_wifi_signal / sensor.neopixel_neopixel_wifi_signal (ESPHome Wi-Fi link RSSI, 1 Hz)
 # Output: sensor.yui_room_zone = kitchen | work_desk | pc_desk | bed | home (at home, place unknown) | away
@@ -191,6 +192,71 @@ mqtt:
     - name: "RP workdesk heap"
       unique_id: rp_workdesk_heap
       state_topic: "presence/workdesk/apple"
+      value_template: "{{ value_json.heap }}"
+      unit_of_measurement: B
+      expire_after: 30
+      entity_category: diagnostic
+    - name: "RP cyd apple best"
+      unique_id: rp_cyd_apple_best
+      state_topic: "presence/cyd/apple"
+      value_template: "{{ value_json.apple_best }}"
+      unit_of_measurement: dBm
+      expire_after: 30
+    - name: "RP cyd apple n"
+      unique_id: rp_cyd_apple_n
+      state_topic: "presence/cyd/apple"
+      value_template: "{{ value_json.apple_n }}"
+      expire_after: 30
+    - name: "RP cyd mov best"
+      unique_id: rp_cyd_mov_best
+      state_topic: "presence/cyd/apple"
+      value_template: "{{ value_json.mov_best | default(value_json.apple_best) }}"
+      unit_of_measurement: dBm
+      expire_after: 30
+    - name: "RP cyd mov n"
+      unique_id: rp_cyd_mov_n
+      state_topic: "presence/cyd/apple"
+      value_template: "{{ value_json.mov_n | default(value_json.apple_n) }}"
+      expire_after: 30
+    - name: "RP cyd static n"
+      unique_id: rp_cyd_static_n
+      state_topic: "presence/cyd/apple"
+      value_template: "{{ value_json.static_n | default(0) }}"
+      expire_after: 30
+    - name: "RP cyd irk avg"
+      unique_id: rp_cyd_irk_avg
+      state_topic: "presence/cyd/apple"
+      value_template: "{% set ph = value_json.irk | selectattr('id', 'eq', 'phone') | list %}{{ ph[0].avg if ph else -127 }}"
+      unit_of_measurement: dBm
+      expire_after: 30
+    - name: "RP cyd irk n"
+      unique_id: rp_cyd_irk_n
+      state_topic: "presence/cyd/apple"
+      value_template: "{% set ph = value_json.irk | selectattr('id', 'eq', 'phone') | list %}{{ ph[0].n if ph else 0 }}"
+      expire_after: 30
+    - name: "RP cyd irk loaded"
+      unique_id: rp_cyd_irk_loaded
+      state_topic: "presence/cyd/apple"
+      value_template: "{{ value_json.irk_n }}"
+      expire_after: 30
+    - name: "RP cyd phone loaded"
+      unique_id: rp_cyd_phone_loaded
+      state_topic: "presence/cyd/apple"
+      value_template: "{% set ph = value_json.irk | selectattr('id', 'eq', 'phone') | list %}{{ 1 if ph else 0 }}"
+      expire_after: 30
+    - name: "RP cyd watch n"
+      unique_id: rp_cyd_watch_n
+      state_topic: "presence/cyd/apple"
+      value_template: "{% set wa = value_json.irk | selectattr('id', 'eq', 'watch') | list %}{{ wa[0].n if wa else 0 }}"
+      expire_after: 30
+    - name: "RP cyd watch loaded"
+      unique_id: rp_cyd_watch_loaded
+      state_topic: "presence/cyd/apple"
+      value_template: "{% set wa = value_json.irk | selectattr('id', 'eq', 'watch') | list %}{{ 1 if wa else 0 }}"
+      expire_after: 30
+    - name: "RP cyd heap"
+      unique_id: rp_cyd_heap
+      state_topic: "presence/cyd/apple"
       value_template: "{{ value_json.heap }}"
       unit_of_measurement: B
       expire_after: 30
@@ -420,6 +486,57 @@ mqtt:
       unit_of_measurement: B
       expire_after: 30
       entity_category: diagnostic
+    - name: "RP cyd csi motion"
+      unique_id: rp_cyd_csi_motion
+      state_topic: "presence/cyd/csi"
+      value_template: "{{ value_json.motion if value_json.ok | int(0) == 1 else None }}"
+      unit_of_measurement: ‰
+      expire_after: 30
+    - name: "RP cyd csi still"
+      unique_id: rp_cyd_csi_still
+      state_topic: "presence/cyd/csi"
+      value_template: "{{ value_json.still if value_json.ok | int(0) == 1 else None }}"
+      unit_of_measurement: ‰
+      expire_after: 30
+    - name: "RP cyd csi mean"
+      unique_id: rp_cyd_csi_mean
+      state_topic: "presence/cyd/csi"
+      value_template: "{{ value_json.mean if value_json.ok | int(0) == 1 else None }}"
+      expire_after: 30
+    - name: "RP cyd csi rssi"
+      unique_id: rp_cyd_csi_rssi
+      state_topic: "presence/cyd/csi"
+      value_template: "{{ value_json.rssi }}"
+      unit_of_measurement: dBm
+      expire_after: 30
+    - name: "RP cyd csi rssi_sd"
+      unique_id: rp_cyd_csi_rssi_sd
+      state_topic: "presence/cyd/csi"
+      value_template: "{{ value_json.rssi_sd }}"
+      unit_of_measurement: dB
+      expire_after: 30
+    - name: "RP cyd csi n"
+      unique_id: rp_cyd_csi_n
+      state_topic: "presence/cyd/csi"
+      value_template: "{{ value_json.n }}"
+      expire_after: 30
+    - name: "RP cyd csi ok"
+      unique_id: rp_cyd_csi_ok
+      state_topic: "presence/cyd/csi"
+      value_template: "{{ value_json.ok }}"
+      expire_after: 30
+    - name: "RP cyd csi on"
+      unique_id: rp_cyd_csi_on
+      state_topic: "presence/cyd/csi"
+      value_template: "{{ value_json.on }}"
+      expire_after: 30
+    - name: "RP cyd csi heap"
+      unique_id: rp_cyd_csi_heap
+      state_topic: "presence/cyd/csi"
+      value_template: "{{ value_json.heap }}"
+      unit_of_measurement: B
+      expire_after: 30
+      entity_category: diagnostic
     - name: "RP kitchen csi motion"
       unique_id: rp_kitchen_csi_motion
       state_topic: "presence/kitchen/csi"
@@ -515,6 +632,15 @@ sensor:
     sampling_size: 30
     precision: 1
   - platform: statistics
+    name: "RP link cyd motion"
+    unique_id: rp_link_cyd_motion
+    entity_id: sensor.rp_cyd_csi_motion
+    state_characteristic: mean
+    max_age:
+      seconds: 10
+    sampling_size: 30
+    precision: 1
+  - platform: statistics
     name: "RP link kitchen motion"
     unique_id: rp_link_kitchen_motion
     entity_id: sensor.rp_kitchen_csi_motion
@@ -567,6 +693,15 @@ template:
             {{ states('sensor.rp_workdesk_irk_avg') | float(-127) if states('sensor.rp_workdesk_irk_n') | int(0) > 0 else -127 }}
           {% elif states('sensor.rp_workdesk_mov_n') | int(0) > 0 %}
             {{ states('sensor.rp_workdesk_mov_best') | float(-127) }}
+          {% else %}-127{% endif %}
+      - name: "RP cyd signal"
+        unique_id: rp_cyd_signal
+        unit_of_measurement: dBm
+        state: >
+          {% if states('sensor.rp_cyd_phone_loaded') | int(0) > 0 %}
+            {{ states('sensor.rp_cyd_irk_avg') | float(-127) if states('sensor.rp_cyd_irk_n') | int(0) > 0 else -127 }}
+          {% elif states('sensor.rp_cyd_mov_n') | int(0) > 0 %}
+            {{ states('sensor.rp_cyd_mov_best') | float(-127) }}
           {% else %}-127{% endif %}
       - name: "RP kitchen signal"
         unique_id: rp_kitchen_signal
@@ -650,13 +785,14 @@ template:
           {% set b = states('sensor.rp_workdesk_signal') | float(-127) %}
           {% set c = states('sensor.rp_nlpi_signal') | float(-127) %}
           {% set d = states('sensor.rp_kitchen_signal') | float(-127) %}
+          {% set e = states('sensor.rp_cyd_signal') | float(-127) %}
           {% set h = states('input_number.rp_hysteresis_db') | float(6) %}
           {% set floor = states('input_number.rp_min_rssi') | float(-90) %}
           {% set prev = this.state | default('unknown') if this is defined else 'unknown' %}
           {% if pc_active %}pc_desk
           {% elif is_state('binary_sensor.yui_home', 'off') %}away
           {% elif kitchen %}kitchen
-          {% elif [a, b, c, d] | max < floor %}home
+          {% elif [a, b, c, d, e] | max < floor %}home
           {% elif states('sensor.rp_fp_zone') not in ['none', 'unknown', 'unavailable'] %}{{ states('sensor.rp_fp_zone') }}
           {% elif prev == 'pc_desk' %}{{ 'work_desk' if b > a + h else 'pc_desk' }}
           {% elif prev == 'work_desk' %}{{ 'pc_desk' if a > b + h else 'work_desk' }}
@@ -667,6 +803,7 @@ template:
           work_signal_dbm: "{{ states('sensor.rp_workdesk_signal') }}"
           bed_signal_dbm: "{{ states('sensor.rp_nlpi_signal') }}"
           kitchen_signal_dbm: "{{ states('sensor.rp_kitchen_signal') }}"
+          cyd_signal_dbm: "{{ states('sensor.rp_cyd_signal') }}"
           pc_idle_s: "{{ states('sensor.rp_pc_idle') }}"
           kitchen_radar: "{{ states('binary_sensor.kitchenradar_presence') }}"
           kitchen_distance_cm: "{{ states('sensor.kitchenradar_detection_distance') }}"
@@ -704,22 +841,22 @@ template:
       - name: "RP phone seen"
         unique_id: rp_phone_seen
         state: >
-          {{ ['sensor.rp_pcdesk_irk_n', 'sensor.rp_workdesk_irk_n', 'sensor.rp_nlpi_irk_n', 'sensor.rp_kitchen_irk_n']
+          {{ ['sensor.rp_pcdesk_irk_n', 'sensor.rp_workdesk_irk_n', 'sensor.rp_nlpi_irk_n', 'sensor.rp_kitchen_irk_n', 'sensor.rp_cyd_irk_n']
              | map('states') | map('int', 0) | select('gt', 0) | list | count > 0 }}
       - name: "RP watch seen"
         unique_id: rp_watch_seen
         state: >
-          {{ ['sensor.rp_pcdesk_watch_n', 'sensor.rp_workdesk_watch_n', 'sensor.rp_nlpi_watch_n', 'sensor.rp_kitchen_watch_n']
+          {{ ['sensor.rp_pcdesk_watch_n', 'sensor.rp_workdesk_watch_n', 'sensor.rp_nlpi_watch_n', 'sensor.rp_kitchen_watch_n', 'sensor.rp_cyd_watch_n']
              | map('states') | map('int', 0) | select('gt', 0) | list | count > 0 }}
       - name: "RP nodes alive"
         unique_id: rp_nodes_alive
         state: >
-          {{ ['sensor.rp_pcdesk_apple_n', 'sensor.rp_workdesk_apple_n', 'sensor.rp_nlpi_apple_n', 'sensor.rp_kitchen_apple_n']
-             | map('states') | select('in', ['unavailable', 'unknown']) | list | count < 4 }}
+          {{ ['sensor.rp_pcdesk_apple_n', 'sensor.rp_workdesk_apple_n', 'sensor.rp_nlpi_apple_n', 'sensor.rp_kitchen_apple_n', 'sensor.rp_cyd_apple_n']
+             | map('states') | select('in', ['unavailable', 'unknown']) | list | count < 5 }}
       - name: "RP phone IRK loaded"
         unique_id: rp_phone_irk_loaded
         state: >
-          {{ ['sensor.rp_pcdesk_phone_loaded', 'sensor.rp_workdesk_phone_loaded', 'sensor.rp_nlpi_phone_loaded', 'sensor.rp_kitchen_phone_loaded']
+          {{ ['sensor.rp_pcdesk_phone_loaded', 'sensor.rp_workdesk_phone_loaded', 'sensor.rp_nlpi_phone_loaded', 'sensor.rp_kitchen_phone_loaded', 'sensor.rp_cyd_phone_loaded']
              | map('states') | map('int', 0) | select('gt', 0) | list | count > 0 }}
       # Away condition (must hold 5 min): the PC is not in use AND
       #   no phone IRK loaded: only the app tracker says not_home;
