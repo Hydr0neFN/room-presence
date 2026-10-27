@@ -63,13 +63,14 @@ def sliding_means(series, window=WINDOW_S, min_n=3):
     return out
 
 
-def read_links():
-    """Read the HA link features through ssh (recorder DB). {} if ssh/HA is not reachable."""
+def read_links(local=False):
+    """Read the HA link features from the recorder DB (ssh from the PC, or local=True on nl-pi). {} if unreachable."""
+    cmd = ["docker", "exec", "-i", "homeassistant", "python", "-", "rp_link_"]
+    if not local:
+        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "nl-pi-lan", " ".join(cmd)]
     try:
         with open(HA_STATES, "rb") as f:
-            r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "nl-pi-lan",
-                                "docker exec -i homeassistant python - rp_link_"],
-                               stdin=f, capture_output=True, timeout=20)
+            r = subprocess.run(cmd, stdin=f, capture_output=True, timeout=20)
         if r.returncode != 0:
             return {}
         out = {}
@@ -116,13 +117,87 @@ def publish(client, fps):
     return body
 
 
+def new_client(client_id):
+    """paho-mqtt 1.x and 2.x both."""
+    if hasattr(mqtt, "CallbackAPIVersion"):
+        return mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=client_id)
+    return mqtt.Client(client_id=client_id)
+
+
 def connect():
     with open(os.path.join(HERE, "pc-idle", "mqtt-pass.local"), encoding="utf-8") as f:
         pw = f.read().strip()
-    c = mqtt.Client(client_id="calibrate_cli")
+    c = new_client("calibrate_cli")
     c.username_pw_set("pcpresence", pw)
     c.connect("10.0.0.20", 1883, 60)
     return c
+
+
+def record_zone(client, zone, seconds, settle=5, links_fn=read_links, progress=None, cancel=None):
+    """Record one zone for `seconds`; returns (entry, feat, info) or None when cancel() turned true.
+    progress(elapsed_s) is called about once a second. Uses message_callback_add, so the caller's on_message stays."""
+    samples = {}
+    motion, still, links = {}, {}, {}
+    t0 = time.time()
+
+    def on_msg(c, u, m):
+        now = time.time()
+        if now - t0 < settle:
+            return
+        try:
+            parts = m.topic.split("/")
+            node, kind = parts[1], parts[2]
+            p = json.loads(m.payload)
+            if kind == "csi":
+                if int(p.get("ok", 0)) == 1:
+                    if p.get("motion") is not None:
+                        motion.setdefault(node, []).append((now, float(p["motion"])))
+                    if p.get("still") is not None:
+                        still.setdefault(node, []).append(float(p["still"]))
+            elif kind == "apple":
+                samples.setdefault(node, []).append(node_signal(p))
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+            pass
+
+    topics = ("presence/+/apple", "presence/+/csi")
+    for t in topics:
+        client.message_callback_add(t, on_msg)
+        client.subscribe(t)
+    try:
+        t_end, next_poll = t0 + seconds, t0 + settle
+        while time.time() < t_end:
+            if cancel and cancel():
+                return None
+            now = time.time()
+            if now >= next_poll:
+                for k, v in links_fn().items():
+                    links.setdefault(k, []).append(v)
+                next_poll = time.time() + POLL_S
+            if progress:
+                progress(min(seconds, now - t0))
+            time.sleep(max(0.0, min(1.0, t_end - time.time())))
+    finally:
+        for t in topics:
+            client.message_callback_remove(t)
+            client.unsubscribe(t)
+    nodes, info = {}, {}
+    for n, vals in samples.items():
+        heard = [v for v in vals if v is not None]
+        nodes[n] = int(statistics.median([v if v is not None else FLOOR for v in vals]))
+        info[n] = f"{len(heard)}/{len(vals)} heard"
+    feat = {}
+    for n, series in motion.items():
+        means = sliding_means(series)
+        if means:
+            feat[f"csi_{n}_motion"] = round(statistics.median(means), 2)
+    for n, vals in still.items():
+        feat[f"csi_{n}_still"] = round(statistics.median(vals), 2)
+    for k, vals in links.items():
+        feat[k] = round(statistics.median(vals), 3)
+    entry = {"nodes": nodes, "recorded": time.strftime("%Y-%m-%d %H:%M"), "heard": info}
+    if feat:
+        entry["feat"] = feat
+    return entry, feat, info
 
 
 def main():
@@ -152,60 +227,13 @@ def main():
     if a.clear:
         fps.pop(a.clear, None)
     elif a.zone:
-        samples = {}
-        motion, still, links = {}, {}, {}
-        t0 = time.time()
-
-        def on_msg(c, u, m):
-            now = time.time()
-            if now - t0 < a.settle:
-                return
-            try:
-                parts = m.topic.split("/")
-                node, kind = parts[1], parts[2]
-                p = json.loads(m.payload)
-                if kind == "csi":
-                    if int(p.get("ok", 0)) == 1:
-                        if p.get("motion") is not None:
-                            motion.setdefault(node, []).append((now, float(p["motion"])))
-                        if p.get("still") is not None:
-                            still.setdefault(node, []).append(float(p["still"]))
-                elif kind == "apple":
-                    samples.setdefault(node, []).append(node_signal(p))
-            except (ValueError, KeyError, IndexError, TypeError, AttributeError):
-                pass
-
-        client.on_message = on_msg
-        client.subscribe("presence/+/apple")
-        client.subscribe("presence/+/csi")
         print(f"Recording '{a.zone}' for {a.seconds} s (first {a.settle} s ignored). Stay in the zone, behave normally.")
-        t_end = t0 + a.seconds
-        while time.time() < t_end:
-            if time.time() - t0 >= a.settle:
-                for k, v in read_links().items():
-                    links.setdefault(k, []).append(v)
-            time.sleep(max(0.0, min(POLL_S, t_end - time.time())))
-        nodes, info = {}, {}
-        for n, vals in samples.items():
-            heard = [v for v in vals if v is not None]
-            nodes[n] = int(statistics.median([v if v is not None else FLOOR for v in vals]))
-            info[n] = f"{len(heard)}/{len(vals)} heard"
+        entry, feat, info = record_zone(client, a.zone, a.seconds, a.settle)
         for n in a.require.split(","):
-            if n and n not in nodes:
+            if n and n not in entry["nodes"]:
                 print(f"WARNING: node '{n}' sent nothing; stored as {FLOOR}")
-        feat = {}
-        for n, series in motion.items():
-            means = sliding_means(series)
-            if means:
-                feat[f"csi_{n}_motion"] = round(statistics.median(means), 2)
-        for n, vals in still.items():
-            feat[f"csi_{n}_still"] = round(statistics.median(vals), 2)
-        for k, vals in links.items():
-            feat[k] = round(statistics.median(vals), 3)
-        fps[a.zone] = {"nodes": nodes, "recorded": time.strftime("%Y-%m-%d %H:%M"), "heard": info}
-        if feat:
-            fps[a.zone]["feat"] = feat
-        print(f"{a.zone}: {nodes}  ({info})")
+        fps[a.zone] = entry
+        print(f"{a.zone}: {entry['nodes']}  ({info})")
         print(f"{a.zone} feat: {feat if feat else 'none (no csi / link data)'}")
     body = publish(client, fps)
     with open(FILE, "w", encoding="utf-8") as f:

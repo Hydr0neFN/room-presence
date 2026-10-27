@@ -146,3 +146,15 @@ ldeskcyd-HEAD1a663a7.bin`), heap 140 kB, MQTT data updating. The owner's NLDeskC
 - The reported zone when at home but nothing heard is `home` (previously `away_or_elsewhere`).
 - The node label for the bed anchor stays `nlpi`.
 - Skipped: NLDeskCYD, ESP8266 sniffing, host-compiled C++ tests (no compiler on this machine).
+
+## Calibrating from the phone (calibration service)
+
+- `nlpi/calibrate_svc.py` runs on nl-pi as `presence-calibrate.service` (install: `nlpi/install_calibrate.sh`, env shared with
+  `presence-ble`). It listens on MQTT `presence/calibrate/cmd` (`{"action":"start","zone":..,"seconds":60}` / `clear` / `cancel`),
+  records with `calibrate.record_zone`, and publishes retained progress to `presence/calibrate/status`.
+- It is the authority for fingerprints: `/var/lib/presence-calibrate/fingerprints.json` on nl-pi (seeded from the retained
+  `presence/config/fingerprints` at first start). The PC `calibrate.py` keeps its own `fingerprints.json`: do not mix the two.
+- HA: dashboard view `定位校準` in `dashboards/house.yaml` (source `ha/dashboard_calibrate_view.yaml`), buttons
+  `button.rp_calibrate_<zone>`, `..._cancel`, `..._clear_<zone>`, sensors `sensor.rp_calibrate_status` / `_progress`.
+- After editing the `mqtt:` section of the HA package, publish anything to `ha/admin/reload_mqtt` (no token needed).
+- Logs: `journalctl -u presence-calibrate`. Rollback: `systemctl disable --now presence-calibrate`; HA backups `*.bak-20261027e`.

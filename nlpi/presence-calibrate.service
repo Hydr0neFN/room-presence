@@ -1,0 +1,15 @@
+[Unit]
+Description=Presence calibration service (MQTT presence/calibrate/cmd -> fingerprints)
+After=mosquitto.service network-online.target docker.service
+
+[Service]
+EnvironmentFile=/etc/presence-ble.env
+Environment=FP_FILE=/var/lib/presence-calibrate/fingerprints.json
+WorkingDirectory=/opt/presence-calibrate
+ExecStart=/usr/bin/python3 /opt/presence-calibrate/calibrate_svc.py
+Restart=always
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

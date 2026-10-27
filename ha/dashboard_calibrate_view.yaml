@@ -1,0 +1,144 @@
+
+  # ================================================================== #
+  # 4. Room presence calibration (定位校準): buttons -> presence/calibrate/cmd
+  #    Service: nl-pi presence-calibrate.service (room-presence/nlpi/calibrate_svc.py)
+  # ================================================================== #
+  - title: 定位校準
+    path: calibrate
+    icon: mdi:crosshairs-gps
+    type: sections
+    max_columns: 2
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: 站在區域內，手機放平常的口袋，按下後保持 60 秒
+          - type: tile
+            entity: sensor.yui_room_zone
+            name: 目前判斷的區域
+            grid_options:
+              columns: full
+          - type: markdown
+            grid_options:
+              columns: full
+            content: >-
+              {% set s = states('sensor.rp_calibrate_status') %}
+              {% set a = state_attr('sensor.rp_calibrate_status', 'zone') %}
+              **狀態**：{{ {'idle':'待命','recording':'錄製中','done':'完成','error':'錯誤','offline':'服務離線'}.get(s, s) }}
+              {% if s == 'recording' %}（{{ a }}，{{ state_attr('sensor.rp_calibrate_status','elapsed') }} /
+              {{ state_attr('sensor.rp_calibrate_status','seconds') }} 秒，{{ states('sensor.rp_calibrate_progress') }}%）{% endif %}
+
+              {{ state_attr('sensor.rp_calibrate_status', 'message') }}
+          - type: tile
+            entity: sensor.rp_calibrate_progress
+            name: 進度
+            grid_options:
+              columns: full
+          - type: button
+            entity: button.rp_calibrate_kitchen
+            name: 校準：廚房
+            icon: mdi:record-rec
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.rp_calibrate_kitchen
+          - type: button
+            entity: button.rp_calibrate_work_desk
+            name: 校準：工作桌
+            icon: mdi:record-rec
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.rp_calibrate_work_desk
+          - type: button
+            entity: button.rp_calibrate_pc_desk
+            name: 校準：電腦桌
+            icon: mdi:record-rec
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.rp_calibrate_pc_desk
+          - type: button
+            entity: button.rp_calibrate_bed
+            name: 校準：床
+            icon: mdi:record-rec
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.rp_calibrate_bed
+          - type: button
+            entity: button.rp_calibrate_cancel
+            name: 取消錄製
+            icon: mdi:stop
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.rp_calibrate_cancel
+      - type: grid
+        cards:
+          - type: heading
+            heading: 已儲存的指紋
+          - type: markdown
+            content: >-
+              {% set z = state_attr('sensor.rp_calibrate_status', 'zones') or {} %}
+              {% for k in ['kitchen','work_desk','pc_desk','bed'] %}
+              - `{{ k }}`：{{ z.get(k, '尚未校準') }}
+              {% endfor %}
+          - type: button
+            entity: button.rp_calibrate_clear_kitchen
+            name: 清除：廚房
+            icon: mdi:delete-outline
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.rp_calibrate_clear_kitchen
+              confirmation:
+                text: 清除「廚房」的指紋？
+          - type: button
+            entity: button.rp_calibrate_clear_work_desk
+            name: 清除：工作桌
+            icon: mdi:delete-outline
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.rp_calibrate_clear_work_desk
+              confirmation:
+                text: 清除「工作桌」的指紋？
+          - type: button
+            entity: button.rp_calibrate_clear_pc_desk
+            name: 清除：電腦桌
+            icon: mdi:delete-outline
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.rp_calibrate_clear_pc_desk
+              confirmation:
+                text: 清除「電腦桌」的指紋？
+          - type: button
+            entity: button.rp_calibrate_clear_bed
+            name: 清除：床
+            icon: mdi:delete-outline
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.rp_calibrate_clear_bed
+              confirmation:
+                text: 清除「床」的指紋？

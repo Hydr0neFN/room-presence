@@ -601,6 +601,17 @@ mqtt:
       value_template: "{{ value_json.ts }}"
       json_attributes_topic: "presence/config/fingerprints"
       json_attributes_template: "{{ {'nodes': value_json.nodes, 'zones': value_json.zones, 'feat': value_json.feat | default({})} | tojson }}"
+    - name: "RP calibrate status"
+      unique_id: rp_calibrate_status
+      state_topic: "presence/calibrate/status"
+      value_template: "{{ value_json.state }}"
+      json_attributes_topic: "presence/calibrate/status"
+      json_attributes_template: "{{ {'zone': value_json.zone, 'pct': value_json.pct, 'elapsed': value_json.elapsed, 'seconds': value_json.seconds, 'message': value_json.message, 'zones': value_json.zones | default({})} | tojson }}"
+    - name: "RP calibrate progress"
+      unique_id: rp_calibrate_progress
+      state_topic: "presence/calibrate/status"
+      value_template: "{{ value_json.pct | default(0) }}"
+      unit_of_measurement: "%"
   binary_sensor:
     - name: "RP PC locked"
       unique_id: rp_pc_locked
@@ -619,6 +630,52 @@ mqtt:
 # and ignored) over the last 10 s, per-mille. ESPHome Wi-Fi links: standard deviation of the
 # 1 Hz link RSSI over 20 s (unit inherited from the source sensor: dBm-valued spread = dB).
 # `kitchen` / `kitchenradar` stay unavailable until those devices exist.
+  button:
+    - name: "RP calibrate kitchen"
+      unique_id: rp_calibrate_kitchen
+      command_topic: "presence/calibrate/cmd"
+      payload_press: '{"action":"start","zone":"kitchen","seconds":60}'
+      qos: 1
+    - name: "RP calibrate work_desk"
+      unique_id: rp_calibrate_work_desk
+      command_topic: "presence/calibrate/cmd"
+      payload_press: '{"action":"start","zone":"work_desk","seconds":60}'
+      qos: 1
+    - name: "RP calibrate pc_desk"
+      unique_id: rp_calibrate_pc_desk
+      command_topic: "presence/calibrate/cmd"
+      payload_press: '{"action":"start","zone":"pc_desk","seconds":60}'
+      qos: 1
+    - name: "RP calibrate bed"
+      unique_id: rp_calibrate_bed
+      command_topic: "presence/calibrate/cmd"
+      payload_press: '{"action":"start","zone":"bed","seconds":60}'
+      qos: 1
+    - name: "RP calibrate cancel"
+      unique_id: rp_calibrate_cancel
+      command_topic: "presence/calibrate/cmd"
+      payload_press: '{"action":"cancel"}'
+      qos: 1
+    - name: "RP calibrate clear kitchen"
+      unique_id: rp_calibrate_clear_kitchen
+      command_topic: "presence/calibrate/cmd"
+      payload_press: '{"action":"clear","zone":"kitchen"}'
+      qos: 1
+    - name: "RP calibrate clear work_desk"
+      unique_id: rp_calibrate_clear_work_desk
+      command_topic: "presence/calibrate/cmd"
+      payload_press: '{"action":"clear","zone":"work_desk"}'
+      qos: 1
+    - name: "RP calibrate clear pc_desk"
+      unique_id: rp_calibrate_clear_pc_desk
+      command_topic: "presence/calibrate/cmd"
+      payload_press: '{"action":"clear","zone":"pc_desk"}'
+      qos: 1
+    - name: "RP calibrate clear bed"
+      unique_id: rp_calibrate_clear_bed
+      command_topic: "presence/calibrate/cmd"
+      payload_press: '{"action":"clear","zone":"bed"}'
+      qos: 1
 sensor:
   - platform: statistics
     name: "RP link pcdesk motion"
@@ -900,6 +957,15 @@ template:
 # light not changed by hand in the last 10 minutes (last_changed also moves for
 # automation changes, which only makes this stricter).
 automation:
+  - id: rp_reload_mqtt_via_mqtt
+    alias: "RP reload MQTT entities on ha/admin/reload_mqtt"
+    description: Publish anything to ha/admin/reload_mqtt after editing the mqtt section of this package.
+    triggers:
+      - trigger: mqtt
+        topic: ha/admin/reload_mqtt
+    actions:
+      - action: mqtt.reload
+    mode: single
   - id: rp_pc_desk_occupied_light_bar_on
     alias: "Room presence: PC desk occupied -> light bar on (warm)"
     mode: single
