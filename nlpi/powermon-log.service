@@ -1,0 +1,14 @@
+[Unit]
+Description=Whole-house power log (powermon + gaming PC) to CSV for later analysis
+After=mosquitto.service network-online.target
+
+[Service]
+EnvironmentFile=/etc/presence-ble.env
+Environment=POWERLOG_DIR=/var/lib/powermon-log
+ExecStart=/usr/bin/python3 /opt/powermon-log/powermon_log.py
+Restart=always
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

@@ -158,3 +158,12 @@ ldeskcyd-HEAD1a663a7.bin`), heap 140 kB, MQTT data updating. The owner's NLDeskC
   `button.rp_calibrate_<zone>`, `..._cancel`, `..._clear_<zone>`, sensors `sensor.rp_calibrate_status` / `_progress`.
 - After editing the `mqtt:` section of the HA package, publish anything to `ha/admin/reload_mqtt` (no token needed).
 - Logs: `journalctl -u presence-calibrate`. Rollback: `systemctl disable --now presence-calibrate`; HA backups `*.bak-20261027e`.
+
+## Power log for later analysis (dinner-time high wattage)
+
+- `nlpi/powermon_log.py` runs on nl-pi as `powermon-log.service` (installed to `/opt/powermon-log`). It logs every
+  `power/powermon/state` (~10 s) with the latest `pc/telemetry/state` watts to `/var/lib/powermon-log/power-YYYY-MM-DD.csv`
+  (`ts,watts,total_kwh,swing_mv,peak_mv,rssi,pc_w,pc_gaming,pulses,rejected`, ~700 KB/day).
+- Any reading >= `EVENT_W` (1000 W) opens an event, closed after 3 readings below: `events.csv`
+  (`start,end,secs,peak_w,mean_w,kwh_est,pc_w_mean`). House load minus `pc_w` ~ the kitchen/other load.
+- Analyse: `scp nl-pi-lan:/var/lib/powermon-log/*.csv .`; zone context (kitchen) is in the HA recorder (`sensor.yui_room_zone`).
