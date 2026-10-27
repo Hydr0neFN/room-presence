@@ -329,12 +329,14 @@ def main():
     c.add_argument("--purge-s", type=int, default=0)
     c.add_argument("--cv", choices=["blocks", "visits"], default="blocks")
     c.add_argument("--recall-w", type=int, default=3)
+    c.add_argument("--ble-nodes", default=",".join(NODES), help="comma list of BLE nodes used in the distance")
     lv = sub.add_parser("live")
     lv.add_argument("fingerprints")
     lv.add_argument("snaps")
     lv.add_argument("labels")
     a = ap.parse_args()
     if a.cmd == "cv":
+        NODES[:] = [n for n in NODES if n in a.ble_nodes.split(",")]
         cmd_cv(a)
     else:
         cmd_live(a)
