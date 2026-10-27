@@ -2,6 +2,11 @@
 
   python tools/fp_eval.py cv   export.csv [--scale zone|label] [--purge-s N] [--cv blocks|visits]
   python tools/fp_eval.py live fingerprints.json snaps.txt export.csv
+  python tools/fp_eval.py weak export.csv zone-v2-*.csv [--cap 300] [--norm raw]
+
+weak: rows of the zone-v2 log (nlpi/zone_log.py) with a non-empty weak_label (passive rules, nlpi/weak_label.py) are used as
+labelled samples: train weak -> test on the manual labels, train manual -> test on the weak rows, and CV on the weak rows blocked
+by day (fewer than 2 days: 4 contiguous time blocks with a 60 s purge, flagged). Per zone at most --cap rows (evenly spaced).
 
 export.csv = label-site export (http://10.0.0.20:8097/api/export.csv, one row per label x node, columns label_id, time,
 zone, node, phone_avg, csi_motion, csi_still ...). snaps.txt = repeated blocks "### HH:MM:SS" followed by the output of
@@ -260,6 +265,108 @@ def cmd_cv(a):
         print(line)
 
 
+def load_weak(paths, norm):
+    """Rows of zone-v2 CSVs with a weak_label; returns (rows, day_of_row list)."""
+    rows, days = [], []
+    for path in paths:
+        with open(path, encoding="utf-8", newline="") as fh:
+            for r in csv.DictReader(fh):
+                if not r.get("weak_label"):
+                    continue
+                ts = datetime.strptime(r["ts"], "%Y-%m-%dT%H:%M:%S")
+                ble = {n: FLOOR_BLE if num(r.get(n + "_phone")) is None else max(num(r[n + "_phone"]), FLOOR_BLE) for n in NODES}
+                motion = {n: num(r.get("csi_%s_motion" % n)) for n in CSI_NODES}
+                still = {n: num(r.get("csi_%s_still" % n)) for n in CSI_NODES}
+                rows.append(Row(ts.timestamp(), r["weak_label"], ble, motion, still, norm))
+                days.append(ts.strftime("%Y-%m-%d"))
+    order = sorted(range(len(rows)), key=lambda i: rows[i].ts)
+    return [rows[i] for i in order], [days[i] for i in order]
+
+
+def cap_rows(rows, cap):
+    out = []
+    for z in sorted({r.zone for r in rows}):
+        zr = [r for r in rows if r.zone == z]
+        step = max(1, len(zr) // cap) if cap else 1
+        out += zr[::step][:cap] if cap else zr
+    return out
+
+
+def score(predict, test):
+    conf = Counter((r.zone, predict(r)) for r in test)
+    return conf
+
+
+def cmd_weak(a):
+    manual = load(a.csv, a.norm)
+    weak, days = load_weak(a.weak, a.norm)
+    wz = Counter(r.zone for r in weak)
+    print("manual labels: %d %s" % (len(manual), dict(Counter(r.zone for r in manual))))
+    print("weak rows: %d %s over days %s" % (len(weak), dict(wz), sorted(set(days))))
+    if len(wz) < 2:
+        print("weak rows cover fewer than 2 zones: nothing to evaluate yet (collect more; see weak_label.py rules)")
+        return
+    wcap = cap_rows(weak, a.cap)
+    methods = ["median", "kit3", "knn5"]
+
+    def table(title, runs):
+        print(chr(10) + title + "; cell = accuracy (balanced accuracy)")
+        print("%-8s" % "method" + "".join("%14s" % ("w=%d" % w) for w in WEIGHTS))
+        confs = {}
+        for m in methods:
+            line = "%-8s" % m
+            for w in WEIGHTS:
+                c = runs(m, w)
+                confs[(m, w)] = c
+                line += "%14s" % (("%.2f (%.2f)" % (acc(c), bal(c))) if c else "n/a")
+            print(line)
+        for m in methods:
+            c = confs[(m, a.recall_w)]
+            if c:
+                print("  recall w=%d %-7s" % (a.recall_w, m) + "  ".join("%s %d/%d" % ((z,) + recall(c, z)) for z in ZONES))
+
+    def weak_to_manual(m, w):
+        have = {r.zone for r in wcap}
+        test = [r for r in manual if r.zone in have]
+        return score(fit(m, wcap, w, a.scale, a.norm), test) if test else Counter()
+
+    def manual_to_weak(m, w):
+        have = {r.zone for r in manual}
+        test = [r for r in cap_rows(weak, 0) if r.zone in have]
+        test = test[::max(1, len(test) // 2000)]
+        return score(fit(m, manual, w, a.scale, a.norm), test) if test else Counter()
+
+    uniq_days = sorted(set(days))
+    if len(uniq_days) >= 2:
+        folds = [[r for r, d in zip(weak, days) if d == day] for day in uniq_days]
+        purge, how = 0, "day-blocked (%d days)" % len(uniq_days)
+    else:
+        n = len(weak)
+        folds = [weak[i * n // 4:(i + 1) * n // 4] for i in range(4)]
+        purge, how = 60, "WARNING only 1 day: 4 contiguous time blocks, 60 s purge"
+
+    def weak_cv(m, w):
+        conf = Counter()
+        for test in folds:
+            if not test:
+                continue
+            lo, hi = min(r.ts for r in test) - purge, max(r.ts for r in test) + purge
+            ids = {id(r) for r in test}
+            train = cap_rows([r for r in weak if id(r) not in ids and (purge == 0 or not lo <= r.ts <= hi)], a.cap)
+            have = {r.zone for r in train}
+            if len(have) < 2:
+                continue
+            p = fit(m, train, w, a.scale, a.norm)
+            for r in test:
+                if r.zone in have:
+                    conf[(r.zone, p(r))] += 1
+        return conf
+
+    table("train weak -> test manual (%d rows after cap)" % len(wcap), weak_to_manual)
+    table("train manual -> test weak", manual_to_weak)
+    table("CV on weak rows, " + how, weak_cv)
+
+
 def parse_snaps(path):
     snaps, cur = [], None
     for line in open(path, encoding="utf-8"):
@@ -330,6 +437,13 @@ def main():
     c.add_argument("--cv", choices=["blocks", "visits"], default="blocks")
     c.add_argument("--recall-w", type=int, default=3)
     c.add_argument("--ble-nodes", default=",".join(NODES), help="comma list of BLE nodes used in the distance")
+    wk = sub.add_parser("weak")
+    wk.add_argument("csv", help="manual label export")
+    wk.add_argument("weak", nargs="+", help="zone-v2-*.csv files")
+    wk.add_argument("--cap", type=int, default=300, help="max rows per zone used for training (evenly spaced)")
+    wk.add_argument("--norm", choices=["raw", "ratio", "logratio"], default="raw")
+    wk.add_argument("--scale", choices=["zone", "label"], default="zone")
+    wk.add_argument("--recall-w", type=int, default=1)
     lv = sub.add_parser("live")
     lv.add_argument("fingerprints")
     lv.add_argument("snaps")
@@ -338,6 +452,8 @@ def main():
     if a.cmd == "cv":
         NODES[:] = [n for n in NODES if n in a.ble_nodes.split(",")]
         cmd_cv(a)
+    elif a.cmd == "weak":
+        cmd_weak(a)
     else:
         cmd_live(a)
 
