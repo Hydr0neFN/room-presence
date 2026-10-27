@@ -1,0 +1,14 @@
+[Unit]
+Description=Zone history log (HA zone + phone/watch RSSI) to CSV for back-tracking
+After=mosquitto.service network-online.target
+
+[Service]
+EnvironmentFile=/etc/presence-ble.env
+Environment=ZONELOG_DIR=/var/lib/zone-log
+ExecStart=/usr/bin/python3 /opt/zone-log/zone_log.py
+Restart=always
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

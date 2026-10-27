@@ -966,6 +966,28 @@ automation:
     actions:
       - action: mqtt.reload
     mode: single
+  - id: rp_zone_to_mqtt
+    alias: "RP publish zone to MQTT (history log)"
+    description: Retained presence/zone/state on every zone change and every minute; the nl-pi zone-log service writes it to CSV.
+    triggers:
+      - trigger: state
+        entity_id:
+          - sensor.yui_room_zone
+          - sensor.rp_fp_zone
+          - binary_sensor.yui_home
+      - trigger: time_pattern
+        minutes: "/1"
+    actions:
+      - action: mqtt.publish
+        data:
+          topic: presence/zone/state
+          retain: true
+          payload: >-
+            {{ {'zone': states('sensor.yui_room_zone'), 'fp': states('sensor.rp_fp_zone'),
+                'home': states('binary_sensor.yui_home'), 'pc_idle': states('sensor.rp_pc_idle'),
+                'radar': states('binary_sensor.kitchenradar_presence'),
+                'radar_cm': states('sensor.kitchenradar_detection_distance')} | tojson }}
+    mode: queued
   - id: rp_pc_desk_occupied_light_bar_on
     alias: "Room presence: PC desk occupied -> light bar on (warm)"
     mode: single

@@ -176,3 +176,10 @@ ldeskcyd-HEAD1a663a7.bin`), heap 140 kB, MQTT data updating. The owner's NLDeskC
   `/api/export.csv`, MQTT event `presence/label/event`.
 - Use: stand in a zone, press its button, repeat at different times/poses; later compare labels with `sensor.yui_room_zone`
   history and re-fit fingerprints.
+
+## Zone history log (back-tracking)
+
+- HA automation `rp_zone_to_mqtt` publishes retained `presence/zone/state` (`zone`, `fp`, `home`, `pc_idle`, `radar`, `radar_cm`)
+  on every change and every minute. `nlpi/zone_log.py` (`zone-log.service`) writes `/var/lib/zone-log/zone-YYYY-MM-DD.csv`
+  every 10 s (zone + fingerprint zone + mean phone/watch dBm per node) and `transitions.csv` (every zone change).
+- Where am I now: `sensor.yui_room_zone`; history: those CSVs (or the HA recorder / logbook).
