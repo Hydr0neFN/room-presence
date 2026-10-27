@@ -1,7 +1,7 @@
 #!/bin/bash
 # Run ON nl-pi as root (morning, owner present). Installs the Bluetooth stack + firmware,
 # the scanner service, and a dedicated mosquitto user. Rollback: see README.
-# Copy first:  scp nlpi_ble.py presence-ble.service install_nlpi.sh root@10.0.0.20:/tmp/
+# Copy first:  scp nlpi_ble.py stationary.py presence-ble.service install_nlpi.sh root@10.0.0.20:/tmp/
 set -euo pipefail
 cd /tmp
 date
@@ -16,7 +16,7 @@ cat /sys/class/bluetooth/hci0/address 2>/dev/null || {
 }
 echo "== scanner service =="
 install -d /opt/presence-ble
-install -m 644 nlpi_ble.py /opt/presence-ble/nlpi_ble.py
+install -m 644 nlpi_ble.py stationary.py /opt/presence-ble/
 install -m 644 presence-ble.service /etc/systemd/system/presence-ble.service
 if [ ! -f /etc/presence-ble.env ]; then
   PW=$(head -c 24 /dev/urandom | base64 | tr -dc A-Za-z0-9 | head -c 24)

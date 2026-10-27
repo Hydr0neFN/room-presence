@@ -3,3 +3,7 @@ firmware/
 rollback/
 build-baseline/
 fingerprints.json
+__pycache__/
+.handoffs/
+lc-port/work/
+lc-port/orig/

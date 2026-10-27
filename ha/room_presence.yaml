@@ -1,12 +1,12 @@
 # Room presence for the one-room studio: KITCHEN / WORK DESK / PC DESK / away.
 # Package file: /opt/homeassistant/config/packages/room_presence.yaml
 #
-# Inputs (all over MQTT, topics documented in /Rpi4/room-presence/REPORT.md):
+# Inputs (all over MQTT, topics documented in /Rpi4/room-presence/README.md):
 #   presence/pcdesk/idle        PC idle seconds   (pc_idle.py, Windows task PresencePcIdle)
 #   presence/pcdesk/apple       BLE RSSI summary  (lightbar2mqtt firmware, anchor at the PC desk)
 #   presence/workdesk/apple     BLE RSSI summary  (LightController firmware, anchor at the work desk)
 #   binary_sensor.kitchenradar_presence + sensor.kitchenradar_detection_distance (LD2410, kitchen)
-# Output: sensor.yui_room_zone = kitchen | work_desk | pc_desk | away_or_elsewhere
+# Output: sensor.yui_room_zone = kitchen | work_desk | pc_desk | bed | home (at home, place unknown) | away
 # and binary_sensor.room_zone_<zone>. Nothing here acts on the lights unless
 # input_boolean.room_presence_automations is on (it is OFF by default).
 
@@ -65,21 +65,52 @@ mqtt:
       state_topic: "presence/pcdesk/apple"
       value_template: "{{ value_json.apple_n }}"
       expire_after: 30
+    - name: "RP pcdesk mov best"
+      unique_id: rp_pcdesk_mov_best
+      state_topic: "presence/pcdesk/apple"
+      value_template: "{{ value_json.mov_best | default(value_json.apple_best) }}"
+      unit_of_measurement: dBm
+      expire_after: 30
+    - name: "RP pcdesk mov n"
+      unique_id: rp_pcdesk_mov_n
+      state_topic: "presence/pcdesk/apple"
+      value_template: "{{ value_json.mov_n | default(value_json.apple_n) }}"
+      expire_after: 30
+    - name: "RP pcdesk static n"
+      unique_id: rp_pcdesk_static_n
+      state_topic: "presence/pcdesk/apple"
+      value_template: "{{ value_json.static_n | default(0) }}"
+      expire_after: 30
     - name: "RP pcdesk irk avg"
       unique_id: rp_pcdesk_irk_avg
       state_topic: "presence/pcdesk/apple"
-      value_template: "{{ value_json.irk[0].avg if value_json.irk | length > 0 else -127 }}"
+      value_template: "{% set ph = value_json.irk | selectattr('id', 'eq', 'phone') | list %}{{ ph[0].avg if ph else -127 }}"
       unit_of_measurement: dBm
       expire_after: 30
     - name: "RP pcdesk irk n"
       unique_id: rp_pcdesk_irk_n
       state_topic: "presence/pcdesk/apple"
-      value_template: "{{ value_json.irk[0].n if value_json.irk | length > 0 else 0 }}"
+      value_template: "{% set ph = value_json.irk | selectattr('id', 'eq', 'phone') | list %}{{ ph[0].n if ph else 0 }}"
       expire_after: 30
     - name: "RP pcdesk irk loaded"
       unique_id: rp_pcdesk_irk_loaded
       state_topic: "presence/pcdesk/apple"
       value_template: "{{ value_json.irk_n }}"
+      expire_after: 30
+    - name: "RP pcdesk phone loaded"
+      unique_id: rp_pcdesk_phone_loaded
+      state_topic: "presence/pcdesk/apple"
+      value_template: "{% set ph = value_json.irk | selectattr('id', 'eq', 'phone') | list %}{{ 1 if ph else 0 }}"
+      expire_after: 30
+    - name: "RP pcdesk watch n"
+      unique_id: rp_pcdesk_watch_n
+      state_topic: "presence/pcdesk/apple"
+      value_template: "{% set wa = value_json.irk | selectattr('id', 'eq', 'watch') | list %}{{ wa[0].n if wa else 0 }}"
+      expire_after: 30
+    - name: "RP pcdesk watch loaded"
+      unique_id: rp_pcdesk_watch_loaded
+      state_topic: "presence/pcdesk/apple"
+      value_template: "{% set wa = value_json.irk | selectattr('id', 'eq', 'watch') | list %}{{ 1 if wa else 0 }}"
       expire_after: 30
     - name: "RP pcdesk heap"
       unique_id: rp_pcdesk_heap
@@ -99,21 +130,52 @@ mqtt:
       state_topic: "presence/workdesk/apple"
       value_template: "{{ value_json.apple_n }}"
       expire_after: 30
+    - name: "RP workdesk mov best"
+      unique_id: rp_workdesk_mov_best
+      state_topic: "presence/workdesk/apple"
+      value_template: "{{ value_json.mov_best | default(value_json.apple_best) }}"
+      unit_of_measurement: dBm
+      expire_after: 30
+    - name: "RP workdesk mov n"
+      unique_id: rp_workdesk_mov_n
+      state_topic: "presence/workdesk/apple"
+      value_template: "{{ value_json.mov_n | default(value_json.apple_n) }}"
+      expire_after: 30
+    - name: "RP workdesk static n"
+      unique_id: rp_workdesk_static_n
+      state_topic: "presence/workdesk/apple"
+      value_template: "{{ value_json.static_n | default(0) }}"
+      expire_after: 30
     - name: "RP workdesk irk avg"
       unique_id: rp_workdesk_irk_avg
       state_topic: "presence/workdesk/apple"
-      value_template: "{{ value_json.irk[0].avg if value_json.irk | length > 0 else -127 }}"
+      value_template: "{% set ph = value_json.irk | selectattr('id', 'eq', 'phone') | list %}{{ ph[0].avg if ph else -127 }}"
       unit_of_measurement: dBm
       expire_after: 30
     - name: "RP workdesk irk n"
       unique_id: rp_workdesk_irk_n
       state_topic: "presence/workdesk/apple"
-      value_template: "{{ value_json.irk[0].n if value_json.irk | length > 0 else 0 }}"
+      value_template: "{% set ph = value_json.irk | selectattr('id', 'eq', 'phone') | list %}{{ ph[0].n if ph else 0 }}"
       expire_after: 30
     - name: "RP workdesk irk loaded"
       unique_id: rp_workdesk_irk_loaded
       state_topic: "presence/workdesk/apple"
       value_template: "{{ value_json.irk_n }}"
+      expire_after: 30
+    - name: "RP workdesk phone loaded"
+      unique_id: rp_workdesk_phone_loaded
+      state_topic: "presence/workdesk/apple"
+      value_template: "{% set ph = value_json.irk | selectattr('id', 'eq', 'phone') | list %}{{ 1 if ph else 0 }}"
+      expire_after: 30
+    - name: "RP workdesk watch n"
+      unique_id: rp_workdesk_watch_n
+      state_topic: "presence/workdesk/apple"
+      value_template: "{% set wa = value_json.irk | selectattr('id', 'eq', 'watch') | list %}{{ wa[0].n if wa else 0 }}"
+      expire_after: 30
+    - name: "RP workdesk watch loaded"
+      unique_id: rp_workdesk_watch_loaded
+      state_topic: "presence/workdesk/apple"
+      value_template: "{% set wa = value_json.irk | selectattr('id', 'eq', 'watch') | list %}{{ 1 if wa else 0 }}"
       expire_after: 30
     - name: "RP workdesk heap"
       unique_id: rp_workdesk_heap
@@ -133,21 +195,52 @@ mqtt:
       state_topic: "presence/nlpi/apple"
       value_template: "{{ value_json.apple_n }}"
       expire_after: 30
+    - name: "RP nlpi mov best"
+      unique_id: rp_nlpi_mov_best
+      state_topic: "presence/nlpi/apple"
+      value_template: "{{ value_json.mov_best | default(value_json.apple_best) }}"
+      unit_of_measurement: dBm
+      expire_after: 30
+    - name: "RP nlpi mov n"
+      unique_id: rp_nlpi_mov_n
+      state_topic: "presence/nlpi/apple"
+      value_template: "{{ value_json.mov_n | default(value_json.apple_n) }}"
+      expire_after: 30
+    - name: "RP nlpi static n"
+      unique_id: rp_nlpi_static_n
+      state_topic: "presence/nlpi/apple"
+      value_template: "{{ value_json.static_n | default(0) }}"
+      expire_after: 30
     - name: "RP nlpi irk avg"
       unique_id: rp_nlpi_irk_avg
       state_topic: "presence/nlpi/apple"
-      value_template: "{{ value_json.irk[0].avg if value_json.irk | length > 0 else -127 }}"
+      value_template: "{% set ph = value_json.irk | selectattr('id', 'eq', 'phone') | list %}{{ ph[0].avg if ph else -127 }}"
       unit_of_measurement: dBm
       expire_after: 30
     - name: "RP nlpi irk n"
       unique_id: rp_nlpi_irk_n
       state_topic: "presence/nlpi/apple"
-      value_template: "{{ value_json.irk[0].n if value_json.irk | length > 0 else 0 }}"
+      value_template: "{% set ph = value_json.irk | selectattr('id', 'eq', 'phone') | list %}{{ ph[0].n if ph else 0 }}"
       expire_after: 30
     - name: "RP nlpi irk loaded"
       unique_id: rp_nlpi_irk_loaded
       state_topic: "presence/nlpi/apple"
       value_template: "{{ value_json.irk_n }}"
+      expire_after: 30
+    - name: "RP nlpi phone loaded"
+      unique_id: rp_nlpi_phone_loaded
+      state_topic: "presence/nlpi/apple"
+      value_template: "{% set ph = value_json.irk | selectattr('id', 'eq', 'phone') | list %}{{ 1 if ph else 0 }}"
+      expire_after: 30
+    - name: "RP nlpi watch n"
+      unique_id: rp_nlpi_watch_n
+      state_topic: "presence/nlpi/apple"
+      value_template: "{% set wa = value_json.irk | selectattr('id', 'eq', 'watch') | list %}{{ wa[0].n if wa else 0 }}"
+      expire_after: 30
+    - name: "RP nlpi watch loaded"
+      unique_id: rp_nlpi_watch_loaded
+      state_topic: "presence/nlpi/apple"
+      value_template: "{% set wa = value_json.irk | selectattr('id', 'eq', 'watch') | list %}{{ 1 if wa else 0 }}"
       expire_after: 30
     - name: "RP fingerprints"
       unique_id: rp_fingerprints
@@ -171,37 +264,38 @@ mqtt:
 
 template:
   - sensor:
-      # Signal of the owner at each anchor, dBm. With an IRK loaded on the node
-      # only the owner's own phone counts (-127 when it was not heard in the last
-      # 3 s window); without one, the strongest Apple Nearby/Handoff advert of
-      # any device is used (single-occupant approximation, can pick up neighbours).
+      # Signal of the owner's PHONE at each anchor, dBm (-127 = not heard in the last
+      # 3 s window). With a phone IRK loaded only the IRK-resolved phone counts. Without
+      # one the strongest Apple advert of a NON-stationary device is used (the node drops
+      # adverts whose RSSI stays in a narrow band for 5+ min: MacBooks, iPad), which is
+      # unreliable (neighbours, a phone lying still gets filtered too): load the IRK.
+      # The watch never feeds the zone (it lies on a table at home).
       - name: "RP pcdesk signal"
         unique_id: rp_pcdesk_signal
         unit_of_measurement: dBm
         state: >
-          {% if states('sensor.rp_pcdesk_irk_loaded') | int(0) > 0 %}
+          {% if states('sensor.rp_pcdesk_phone_loaded') | int(0) > 0 %}
             {{ states('sensor.rp_pcdesk_irk_avg') | float(-127) if states('sensor.rp_pcdesk_irk_n') | int(0) > 0 else -127 }}
-          {% elif states('sensor.rp_pcdesk_apple_n') | int(0) > 0 %}
-            {{ states('sensor.rp_pcdesk_apple_best') | float(-127) }}
+          {% elif states('sensor.rp_pcdesk_mov_n') | int(0) > 0 %}
+            {{ states('sensor.rp_pcdesk_mov_best') | float(-127) }}
           {% else %}-127{% endif %}
       - name: "RP workdesk signal"
         unique_id: rp_workdesk_signal
         unit_of_measurement: dBm
         state: >
-          {% if states('sensor.rp_workdesk_irk_loaded') | int(0) > 0 %}
+          {% if states('sensor.rp_workdesk_phone_loaded') | int(0) > 0 %}
             {{ states('sensor.rp_workdesk_irk_avg') | float(-127) if states('sensor.rp_workdesk_irk_n') | int(0) > 0 else -127 }}
-          {% elif states('sensor.rp_workdesk_apple_n') | int(0) > 0 %}
-            {{ states('sensor.rp_workdesk_apple_best') | float(-127) }}
+          {% elif states('sensor.rp_workdesk_mov_n') | int(0) > 0 %}
+            {{ states('sensor.rp_workdesk_mov_best') | float(-127) }}
           {% else %}-127{% endif %}
-
       - name: "RP nlpi signal"
         unique_id: rp_nlpi_signal
         unit_of_measurement: dBm
         state: >
-          {% if states('sensor.rp_nlpi_irk_loaded') | int(0) > 0 %}
+          {% if states('sensor.rp_nlpi_phone_loaded') | int(0) > 0 %}
             {{ states('sensor.rp_nlpi_irk_avg') | float(-127) if states('sensor.rp_nlpi_irk_n') | int(0) > 0 else -127 }}
-          {% elif states('sensor.rp_nlpi_apple_n') | int(0) > 0 %}
-            {{ states('sensor.rp_nlpi_apple_best') | float(-127) }}
+          {% elif states('sensor.rp_nlpi_mov_n') | int(0) > 0 %}
+            {{ states('sensor.rp_nlpi_mov_best') | float(-127) }}
           {% else %}-127{% endif %}
 
       # Nearest-fingerprint zone (written by calibrate.py). RMS distance in dB over
@@ -242,15 +336,18 @@ template:
           {% set floor = states('input_number.rp_min_rssi') | float(-90) %}
           {% set prev = this.state | default('unknown') if this is defined else 'unknown' %}
           {% if pc_active %}pc_desk
+          {% elif is_state('binary_sensor.yui_home', 'off') %}away
           {% elif kitchen %}kitchen
-          {% elif [a, b, c] | max < floor %}away_or_elsewhere
+          {% elif [a, b, c] | max < floor %}home
           {% elif states('sensor.rp_fp_zone') not in ['none', 'unknown', 'unavailable'] %}{{ states('sensor.rp_fp_zone') }}
           {% elif prev == 'pc_desk' %}{{ 'work_desk' if b > a + h else 'pc_desk' }}
           {% elif prev == 'work_desk' %}{{ 'pc_desk' if a > b + h else 'work_desk' }}
           {% else %}{{ 'pc_desk' if a >= b else 'work_desk' }}{% endif %}
         attributes:
+          home: "{{ states('binary_sensor.yui_home') }}"
           pc_signal_dbm: "{{ states('sensor.rp_pcdesk_signal') }}"
           work_signal_dbm: "{{ states('sensor.rp_workdesk_signal') }}"
+          bed_signal_dbm: "{{ states('sensor.rp_nlpi_signal') }}"
           pc_idle_s: "{{ states('sensor.rp_pc_idle') }}"
           kitchen_radar: "{{ states('binary_sensor.kitchenradar_presence') }}"
           kitchen_distance_cm: "{{ states('sensor.kitchenradar_detection_distance') }}"
@@ -280,8 +377,51 @@ template:
         delay_off: "00:01:00"
       - name: "Room zone away"
         unique_id: room_zone_away
-        state: "{{ is_state('sensor.yui_room_zone', 'away_or_elsewhere') }}"
-        delay_on: "00:02:00"
+        state: "{{ is_state('sensor.yui_room_zone', 'away') }}"
+      # --- home / away. Phone IRK (any node) is the main evidence, the HA mobile app
+      # tracker (device_tracker.ephone) the second. The watch lies on the table at home
+      # and only goes out ~90 % of the time, so "watch heard" never keeps the owner home
+      # by itself once the phone is gone and the app says not_home.
+      - name: "RP phone seen"
+        unique_id: rp_phone_seen
+        state: >
+          {{ ['sensor.rp_pcdesk_irk_n', 'sensor.rp_workdesk_irk_n', 'sensor.rp_nlpi_irk_n']
+             | map('states') | map('int', 0) | select('gt', 0) | list | count > 0 }}
+      - name: "RP watch seen"
+        unique_id: rp_watch_seen
+        state: >
+          {{ ['sensor.rp_pcdesk_watch_n', 'sensor.rp_workdesk_watch_n', 'sensor.rp_nlpi_watch_n']
+             | map('states') | map('int', 0) | select('gt', 0) | list | count > 0 }}
+      - name: "RP nodes alive"
+        unique_id: rp_nodes_alive
+        state: >
+          {{ ['sensor.rp_pcdesk_apple_n', 'sensor.rp_workdesk_apple_n', 'sensor.rp_nlpi_apple_n']
+             | map('states') | select('in', ['unavailable', 'unknown']) | list | count < 3 }}
+      - name: "RP phone IRK loaded"
+        unique_id: rp_phone_irk_loaded
+        state: >
+          {{ ['sensor.rp_pcdesk_phone_loaded', 'sensor.rp_workdesk_phone_loaded', 'sensor.rp_nlpi_phone_loaded']
+             | map('states') | map('int', 0) | select('gt', 0) | list | count > 0 }}
+      # Away condition (must hold 5 min): the PC is not in use AND
+      #   no phone IRK loaded: only the app tracker says not_home;
+      #   else phone not heard by any node AND (watch not heard OR app says not_home);
+      #   no node alive: only the app tracker.
+      - name: "RP away condition"
+        unique_id: rp_away_condition
+        delay_on: "00:05:00"
+        state: >
+          {% set pc_active = is_state('binary_sensor.rp_pc_online', 'on')
+               and is_state('binary_sensor.rp_pc_locked', 'off')
+               and states('sensor.rp_pc_idle') | float(9999) < 60 %}
+          {% set app_away = is_state('device_tracker.ephone', 'not_home') %}
+          {% if pc_active %}false
+          {% elif is_state('binary_sensor.rp_nodes_alive', 'off') or is_state('binary_sensor.rp_phone_irk_loaded', 'off') %}{{ app_away }}
+          {% else %}{{ is_state('binary_sensor.rp_phone_seen', 'off')
+                       and (is_state('binary_sensor.rp_watch_seen', 'off') or app_away) }}{% endif %}
+      - name: "Yui home"
+        unique_id: yui_home
+        device_class: presence
+        state: "{{ is_state('binary_sensor.rp_away_condition', 'off') }}"
 
 # Automations: conservative and gated. Every one needs the master switch on,
 # darkness (sun below horizon), the 00:30-07:30 quiet window respected, and the

@@ -4,8 +4,8 @@
   py -3.13 calibrate.py --show
   py -3.13 calibrate.py --clear bed
 
-Per node and per 3 s message the signal is the owner's IRK-resolved phone (if an IRK is
-loaded on that node) else the strongest Apple advert; a message without a sample counts
+Per node and per 3 s message the signal is the owner's IRK-resolved PHONE (if a phone IRK is
+loaded on that node) else the strongest non-stationary Apple advert (the watch is never used); a message without a sample counts
 as -100 (same rule as Home Assistant). The median per node is stored in fingerprints.json
 and published retained to presence/config/fingerprints, which Home Assistant matches against.
 """
@@ -24,10 +24,13 @@ FLOOR = -100
 
 
 def node_signal(p):
-    if p.get("irk_n", 0) > 0:
-        irk = p.get("irk") or []
-        return irk[0]["avg"] if irk and irk[0]["n"] > 0 else None
-    return p["apple_best"] if p.get("apple_n", 0) > 0 else None
+    """Same rule as Home Assistant: the labelled phone IRK, else the strongest NON-stationary Apple advert."""
+    irk = p.get("irk") or []
+    phone = [e for e in irk if e.get("id", "phone") == "phone"]
+    if phone:
+        return phone[0]["avg"] if phone[0]["n"] > 0 else None
+    n = p.get("mov_n", p.get("apple_n", 0))
+    return p.get("mov_best", p.get("apple_best")) if n > 0 else None
 
 
 def load():
