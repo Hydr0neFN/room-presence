@@ -34,7 +34,8 @@ WINDOW_S = 10.0         # sliding mean window for csi motion
 POLL_S = 5.0            # HA link feature poll period
 SCALE_FLOOR_CSI = 3.0   # per-mille
 SCALE_FLOOR_LINK = 0.5  # dB
-LINKS = {"sensor.rp_link_kitchenradar_motion": "link_kitchenradar",
+LINKS = {"sensor.rp_link_kitchenrssi_motion": "link_kitchenrssi",  # powermon C3 (node kitchen) link RSSI std dev
+         "sensor.rp_link_kitchenradar_motion": "link_kitchenradar",
          "sensor.rp_link_neopixel_motion": "link_neopixel"}
 HA_STATES = os.path.join(HERE, "ha", "ha_states.py")
 

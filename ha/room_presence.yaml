@@ -537,6 +537,13 @@ mqtt:
       unit_of_measurement: B
       expire_after: 30
       entity_category: diagnostic
+    - name: "RP kitchen wifi rssi"
+      unique_id: rp_kitchen_wifi_rssi
+      state_topic: "presence/kitchen/wifi_rssi"
+      value_template: "{{ value_json.rssi }}"
+      unit_of_measurement: dBm
+      device_class: signal_strength
+      expire_after: 10
     - name: "RP kitchen csi motion"
       unique_id: rp_kitchen_csi_motion
       state_topic: "presence/kitchen/csi"
@@ -649,6 +656,15 @@ sensor:
       seconds: 10
     sampling_size: 30
     precision: 1
+  - platform: statistics
+    name: "RP link kitchenrssi motion"
+    unique_id: rp_link_kitchenrssi_motion
+    entity_id: sensor.rp_kitchen_wifi_rssi
+    state_characteristic: standard_deviation
+    max_age:
+      seconds: 20
+    sampling_size: 30
+    precision: 2
   - platform: statistics
     name: "RP link kitchenradar motion"
     unique_id: rp_link_kitchenradar_motion
