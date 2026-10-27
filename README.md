@@ -181,12 +181,12 @@ ldeskcyd-HEAD1a663a7.bin`), heap 140 kB, MQTT data updating. The owner's NLDeskC
 
 - HA automation `rp_zone_to_mqtt` publishes retained `presence/zone/state` (zone, fp zone, home, PC online/locked/idle, kitchen radar,
   `light.channel_b` and light bar state + last-change epoch, ESPHome link motion) every 10 s and on change. `nlpi/zone_log.py`
-  (`zone-log.service`, with `weak_label.py`) writes `/var/lib/zone-log/zone-v2-YYYY-MM-DD.csv` every 10 s: zone, fp zone, `weak_label` +
-  `weak_rules`, the context columns, powermon W, mean phone/watch dBm per node and the 10 s CSI motion/still means per node (the
-  features the matcher uses), and `transitions.csv` (every zone change). `zone-YYYY-MM-DD.csv` (no `-v2`) is the old schema.
-- Weak labels (passive training data, no button presses): rules and thresholds in the `nlpi/weak_label.py` docstring (pc_desk = PC
+  (`zone-log.service`) writes `/var/lib/zone-log/zone-v3-YYYY-MM-DD.csv` every 10 s: zone, fp zone, the context columns (PC, radar,
+  powermon W, lights incl. kitchen light / NeoPixel, gaming PC), mean phone/watch dBm per node and the 10 s CSI motion/still means per node (the
+  features the matcher uses), and `transitions.csv` (every zone change). `zone-YYYY-MM-DD.csv` (v1) and `zone-v2-*` (live weak_label) are old schemas.
+- Weak labels (passive training data, no button presses): rules and thresholds in the `tools/weak_labels.py` docstring (applied offline, not by the logger) (pc_desk = PC
   unlocked and idle < 60 s; kitchen = radar < 250 cm or powermon >= 1000 W; work_desk = `light.channel_b` on + PC inactive + workdesk
   phone above its median; bed = 00:30-07:30, PC locked, phone RSSI stable 10 min). Empty = unsure, two zones = conflict = empty.
-  Train/evaluate on them: `python tools/fp_eval.py weak export.csv zone-v2-*.csv`. Tests: `python nlpi/test_weak_label.py`,
+  Train/evaluate on them: `python tools/fp_eval.py weak export.csv zone-v3-*.csv`. Tests: `python tools/test_weak_labels.py`,
   `python nlpi/test_zone_log.py`.
 - Where am I now: `sensor.yui_room_zone`; history: those CSVs (or the HA recorder / logbook).

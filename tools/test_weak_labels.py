@@ -1,11 +1,11 @@
-"""Unit tests for weak_label.classify (synthetic inputs only)."""
+"""Unit tests for weak_labels.classify (synthetic inputs only)."""
 import os
 import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from weak_label import classify
+from weak_labels import classify
 
 
 def ctx(**kw):

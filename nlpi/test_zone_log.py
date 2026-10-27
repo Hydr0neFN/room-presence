@@ -22,7 +22,7 @@ class TestRow(unittest.TestCase):
     def ctx(self, now, **kw):
         p = {"zone": "pc_desk", "fp": "kitchen", "home": "on", "pc_online": "on", "pc_locked": "off", "pc_idle": "3",
              "radar": "off", "radar_cm": "110", "wd_light": "off", "wd_light_ts": now - 5000, "lightbar": "off",
-             "lightbar_ts": now - 100, "link_kitchenradar": "1.1", "link_neopixel": "0.7", "link_kitchenrssi": "1.3"}
+             "lightbar_ts": now - 100, "link_kitchenradar": "1.1", "link_neopixel": "0.7", "link_kitchenrssi": "1.3", "kitchen_light": "off", "kitchen_light_ts": now - 60}
         p.update(kw)
         self.s.add_ctx(now, p)
 
@@ -43,8 +43,10 @@ class TestRow(unittest.TestCase):
         self.assertEqual(col(row, "cyd_watch"), -60.0)
         self.assertEqual(col(row, "power_w"), 252)
         self.assertEqual(col(row, "wd_light_age_s"), 5005)
-        self.assertEqual(col(row, "weak_label"), "pc_desk")
-        self.assertEqual(col(row, "weak_rules"), "pc_desk")
+        self.assertEqual(col(row, "kitchen_light"), "off")
+        self.assertEqual(col(row, "kitchen_light_age_s"), 65)
+        self.assertEqual(col(row, "gaming"), "")
+        self.assertNotIn("weak_label", HEAD)
 
     def test_negative_still_skipped(self):
         self.ctx(self.t0)
@@ -57,7 +59,6 @@ class TestRow(unittest.TestCase):
         self.ctx(self.t0)
         row = self.s.make_row(self.t0 + zone_log.CTX_STALE_S + 1)
         self.assertEqual(col(row, "zone"), "")
-        self.assertEqual(col(row, "weak_label"), "")
 
     def test_power_window_and_kitchen_label(self):
         t = self.t0
@@ -66,12 +67,10 @@ class TestRow(unittest.TestCase):
         self.s.add_power(t + 60, {"watts": 150})
         row = self.s.make_row(t + 61)
         self.assertEqual(col(row, "power_max120"), 2100)
-        self.assertEqual(col(row, "weak_label"), "kitchen")
         row = self.s.make_row(t + 130)                          # the 2100 W sample left the 120 s window
         self.ctx(t + 130, pc_locked="on", pc_idle="9000")
         row = self.s.make_row(t + 131)
         self.assertEqual(col(row, "power_max120"), 150)
-        self.assertEqual(col(row, "weak_label"), "")
 
 
 if __name__ == "__main__":

@@ -982,6 +982,9 @@ automation:
           - binary_sensor.kitchenradar_presence
           - light.channel_b
           - light.monitor_light_bar_light_bar
+          - light.kitchenlight_kitchen_light
+          - light.neopixel_neopixel
+          - binary_sensor.gaming_pc_gaming
       - trigger: time_pattern
         seconds: "/10"
     actions:
@@ -1001,7 +1004,18 @@ automation:
                 'lightbar_ts': (as_timestamp(states['light.monitor_light_bar_light_bar'].last_changed) if states['light.monitor_light_bar_light_bar'] is not none else 0),
                 'link_kitchenradar': states('sensor.rp_link_kitchenradar_motion'),
                 'link_neopixel': states('sensor.rp_link_neopixel_motion'),
-                'link_kitchenrssi': states('sensor.rp_link_kitchenrssi_motion')} | tojson }}
+                'link_kitchenrssi': states('sensor.rp_link_kitchenrssi_motion'),
+                'kitchen_light': states('light.kitchenlight_kitchen_light'),
+                'kitchen_light_ts': (as_timestamp(states['light.kitchenlight_kitchen_light'].last_changed) if states['light.kitchenlight_kitchen_light'] is not none else 0),
+                'neopixel': states('light.neopixel_neopixel'),
+                'neopixel_ts': (as_timestamp(states['light.neopixel_neopixel'].last_changed) if states['light.neopixel_neopixel'] is not none else 0),
+                'gaming': states('binary_sensor.gaming_pc_gaming'),
+                'gaming_pc_w': states('sensor.gaming_pc_power'),
+                'radar_moving': states('binary_sensor.kitchenradar_moving_target'),
+                'radar_move_cm': states('sensor.kitchenradar_moving_distance'),
+                'radar_still_cm': states('sensor.kitchenradar_still_distance'),
+                'radar_move_en': states('sensor.kitchenradar_moving_energy'),
+                'radar_still_en': states('sensor.kitchenradar_still_energy')} | tojson }}
     mode: queued
   - id: rp_pc_desk_occupied_light_bar_on
     alias: "Room presence: PC desk occupied -> light bar on (warm)"

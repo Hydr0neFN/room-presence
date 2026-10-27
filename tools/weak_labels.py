@@ -1,4 +1,7 @@
-"""Weak zone labels from passive context (pure function, stdlib; used by zone_log.py, tested by test_weak_label.py).
+"""Weak zone labels from passive context (stdlib), applied OFFLINE to the zone-v3 CSV log so rules can be revised retroactively.
+
+  python tools/weak_labels.py zone-v3-*.csv      prints the label tally; label_csv() is what fp_eval weak uses
+Tests: python tools/test_weak_labels.py.
 
 classify(c) -> (label, fired)   label is "" when unsure; fired = list of rule names that matched.
 Conservative by design: a rule needs its own evidence, two different zones firing = conflict = "".
@@ -80,3 +83,55 @@ def classify(c):
             and c.get("radar") == "off" and c.get("home") == "on" and sd is not None and sd <= BED_STABLE_SD_DB):
         fired.append("bed")
     return (fired[0] if len(fired) == 1 else ""), fired
+
+
+def _f(v):
+    try:
+        return float(v) if v not in ("", None) else None
+    except ValueError:
+        return None
+
+
+def label_csv(paths):
+    """Read zone-v3 CSVs (sorted by name) and return [(row dict, label, fired)]. The rolling inputs are derived here from the raw
+    columns: the 6 h median of the workdesk phone RSSI (>= MIN_MED_N heard windows) and the largest 10 min stdev of the phone RSSI
+    over nodes that heard it in >= 40 of the last 60 windows (10 s rows)."""
+    import csv
+    import statistics
+    from collections import deque
+    from datetime import datetime
+    nodes = ["cyd", "kitchen", "nlpi", "pcdesk", "workdesk"]
+    out = []
+    for path in sorted(paths):
+        hist = {n: deque(maxlen=60) for n in nodes}
+        wd = deque(maxlen=2160)
+        with open(path, encoding="utf-8", newline="") as fh:
+            for r in csv.DictReader(fh):
+                for n in nodes:
+                    hist[n].append(_f(r.get(n + "_phone")))
+                wp = _f(r.get("workdesk_phone"))
+                if wp is not None:
+                    wd.append(wp)
+                sds = []
+                for n in nodes:
+                    vals = [v for v in hist[n] if v is not None]
+                    if len(hist[n]) >= 60 and len(vals) >= 40:
+                        sds.append(statistics.pstdev(vals))
+                t = datetime.strptime(r["ts"], "%Y-%m-%dT%H:%M:%S")
+                c = {"home": r.get("home"), "minute": t.hour * 60 + t.minute, "pc_online": r.get("pc_online"),
+                     "pc_locked": r.get("pc_locked"), "pc_idle": r.get("pc_idle"), "radar": r.get("radar"),
+                     "radar_cm": r.get("radar_cm"), "power_max120": r.get("power_max120"), "wd_light": r.get("wd_light"),
+                     "wd_light_age": r.get("wd_light_age_s"), "wd_phone": wp,
+                     "wd_phone_med": statistics.median(wd) if len(wd) >= MIN_MED_N else None,
+                     "phone_sd_10m": max(sds) if sds else None}
+                label, fired = classify(c)
+                out.append((r, label, fired))
+    return out
+
+
+if __name__ == "__main__":
+    import sys
+    from collections import Counter
+    res = label_csv(sys.argv[1:])
+    print("rows", len(res), dict(Counter(lab or "(empty)" for _, lab, _ in res)),
+          "conflicts", sum(1 for _, lab, f in res if len(f) > 1))

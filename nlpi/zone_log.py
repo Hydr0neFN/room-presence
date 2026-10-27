@@ -1,27 +1,24 @@
-"""Zone history log (runs on nl-pi) so movements can be tracked back later, and passive weak labels for training.
+"""Zone history log (runs on nl-pi): raw context + features for back-tracking and offline (weak-label) training.
 
   presence/zone/state (retained, published by the HA automation rp_zone_to_mqtt every 10 s + on change): zone, fp zone, home,
       PC lock / idle, kitchen radar, work desk light (light.channel_b), light bar, link motion of the ESPHome nodes
   presence/<node>/apple   phone / watch IRK-labelled RSSI per node
   presence/<node>/csi     CSI 1 s summaries (motion, still, ok)
   power/powermon/state    powermon watts
-    -> DIR/zone-v2-YYYY-MM-DD.csv   every 10 s, columns in HEAD (schema v2; the old zone-YYYY-MM-DD.csv files are schema v1)
+    -> DIR/zone-v3-YYYY-MM-DD.csv   every 10 s, columns in HEAD (schema v3; zone-YYYY-MM-DD.csv = v1, zone-v2-* = v2 with a live weak_label)
     -> DIR/transitions.csv          ts, from, to   (every change of `zone`)
 Phone / watch columns: mean dBm of the last 10 s, empty = not heard. csi_<node>_motion / _still: mean over the last 10 s of the
 messages with ok=1 (the HA matcher sees the 10 s mean of motion via sensor.rp_link_<node>_motion and the latest still value).
-weak_label: see weak_label.py for the rules (empty = unsure); weak_rules lists every rule that fired (two zones = conflict).
-Context older than CTX_STALE_S (HA silent) is written blank and gives no weak label.
+Raw logging only: weak zone labels are derived offline from these columns by tools/weak_labels.py (rules can change retroactively).
+Context older than CTX_STALE_S (HA silent) is written blank.
 Env: MQTT_* (presence-ble.env), ZONELOG_DIR (default /var/lib/zone-log).
 """
 import csv
 import json
 import os
-import statistics
 import threading
 import time
 from collections import defaultdict, deque
-
-from weak_label import classify
 
 DIR = os.environ.get("ZONELOG_DIR", "/var/lib/zone-log")
 NODES = ["cyd", "kitchen", "nlpi", "pcdesk", "workdesk"]
@@ -29,17 +26,17 @@ CSI_NODES = ["cyd", "kitchen", "pcdesk", "workdesk"]
 PERIOD_S = 10
 CTX_STALE_S = 90
 POWER_WINDOW_S = 120
-PHONE_HIST = 60            # 10 min of 10 s rows
-PHONE_HIST_MIN_HEARD = 40
-WD_MEDIAN_HIST = 2160      # 6 h
-WD_MEDIAN_MIN_N = 30
-HEAD = (["ts", "zone", "fp_zone", "home", "weak_label", "weak_rules", "pc_online", "pc_locked", "pc_idle", "radar", "radar_cm",
+HEAD = (["ts", "zone", "fp_zone", "home", "pc_online", "pc_locked", "pc_idle", "radar", "radar_cm",
          "power_w", "power_max120", "wd_light", "wd_light_age_s", "lightbar", "lightbar_age_s",
-         "link_kitchenradar", "link_neopixel", "link_kitchenrssi"]
+         "link_kitchenradar", "link_neopixel", "link_kitchenrssi", "kitchen_light", "kitchen_light_age_s", "neopixel",
+         "neopixel_age_s", "gaming", "gaming_pc_w", "radar_moving", "radar_move_cm", "radar_still_cm", "radar_move_en",
+         "radar_still_en"]
         + [f"{n}_{k}" for n in NODES for k in ("phone", "watch")]
         + [f"csi_{n}_{k}" for n in CSI_NODES for k in ("motion", "still")])
 CTX_KEYS = ["zone", "fp", "home", "pc_online", "pc_locked", "pc_idle", "radar", "radar_cm", "wd_light", "wd_light_ts",
-            "lightbar", "lightbar_ts", "link_kitchenradar", "link_neopixel", "link_kitchenrssi"]
+            "lightbar", "lightbar_ts", "link_kitchenradar", "link_neopixel", "link_kitchenrssi", "kitchen_light", "kitchen_light_ts",
+            "neopixel", "neopixel_ts", "gaming", "gaming_pc_w", "radar_moving", "radar_move_cm", "radar_still_cm", "radar_move_en",
+            "radar_still_en"]
 
 
 def iso(t):
@@ -68,8 +65,6 @@ class State:
         self.power = deque()                # (t, watts)
         self.ctx = {}
         self.ctx_t = 0.0
-        self.ph_hist = defaultdict(lambda: deque(maxlen=PHONE_HIST))   # node -> window means (None = not heard)
-        self.wd_hist = deque(maxlen=WD_MEDIAN_HIST)
 
     def add_ctx(self, now, p):
         self.ctx = {k: p.get(k, "") for k in CTX_KEYS}
@@ -89,32 +84,15 @@ class State:
         if p.get("watts") is not None:
             self.power.append((now, float(p["watts"])))
 
-    def phone_sd_10m(self):
-        sds = []
-        for n in NODES:
-            h = self.ph_hist[n]
-            vals = [v for v in h if v is not None]
-            if len(h) >= PHONE_HIST and len(vals) >= PHONE_HIST_MIN_HEARD:
-                sds.append(statistics.pstdev(vals))
-        return max(sds) if sds else None
-
     def make_row(self, now):
         cutoff = now - PERIOD_S
-        phone_win = {}
         sig_cols = []
         for n in NODES:
             for k in ("phone", "watch"):
                 q = self.sig[(n, k)]
                 while q and q[0][0] < cutoff:
                     q.popleft()
-                v = mean_or_blank([x for _, x in q])
-                sig_cols.append(v)
-                if k == "phone":
-                    phone_win[n] = v if v != "" else None
-        for n in NODES:
-            self.ph_hist[n].append(phone_win[n])
-        if phone_win["workdesk"] is not None:
-            self.wd_hist.append(phone_win["workdesk"])
+                sig_cols.append(mean_or_blank([x for _, x in q]))
         csi_cols = []
         for n in CSI_NODES:
             q = self.csi[n]
@@ -134,21 +112,14 @@ class State:
                 return round(now - float(ts)) if ts and float(ts) > 0 else ""
             except (TypeError, ValueError):
                 return ""
-        lt = time.localtime(now)
-        med = statistics.median(self.wd_hist) if len(self.wd_hist) >= WD_MEDIAN_MIN_N else None
-        label, fired = ("", [])
-        wd_age = age("wd_light_ts")
-        if fresh:
-            label, fired = classify({
-                "home": c.get("home"), "minute": lt.tm_hour * 60 + lt.tm_min, "pc_online": c.get("pc_online"),
-                "pc_locked": c.get("pc_locked"), "pc_idle": c.get("pc_idle"), "radar": c.get("radar"),
-                "radar_cm": c.get("radar_cm"), "power_max120": power_max if power_max != "" else None,
-                "wd_light": c.get("wd_light"), "wd_light_age": wd_age if wd_age != "" else None, "wd_phone": phone_win["workdesk"],
-                "wd_phone_med": med, "phone_sd_10m": self.phone_sd_10m()})
-        return ([iso(now), c.get("zone", ""), c.get("fp", ""), c.get("home", ""), label, "+".join(fired),
+        wd_age, lb_age = age("wd_light_ts"), age("lightbar_ts")
+        return ([iso(now), c.get("zone", ""), c.get("fp", ""), c.get("home", ""),
                  c.get("pc_online", ""), c.get("pc_locked", ""), c.get("pc_idle", ""), c.get("radar", ""), c.get("radar_cm", ""),
-                 power_w, power_max, c.get("wd_light", ""), wd_age, c.get("lightbar", ""), age("lightbar_ts"),
-                 c.get("link_kitchenradar", ""), c.get("link_neopixel", ""), c.get("link_kitchenrssi", "")]
+                 power_w, power_max, c.get("wd_light", ""), wd_age, c.get("lightbar", ""), lb_age,
+                 c.get("link_kitchenradar", ""), c.get("link_neopixel", ""), c.get("link_kitchenrssi", ""),
+                 c.get("kitchen_light", ""), age("kitchen_light_ts"), c.get("neopixel", ""), age("neopixel_ts"),
+                 c.get("gaming", ""), c.get("gaming_pc_w", ""), c.get("radar_moving", ""), c.get("radar_move_cm", ""),
+                 c.get("radar_still_cm", ""), c.get("radar_move_en", ""), c.get("radar_still_en", "")]
                 + sig_cols + csi_cols)
 
 
@@ -186,7 +157,7 @@ def writer():
         with lock:
             row = state.make_row(now)
         try:
-            append(os.path.join(DIR, "zone-v2-" + time.strftime("%Y-%m-%d", time.localtime(now)) + ".csv"), HEAD, row)
+            append(os.path.join(DIR, "zone-v3-" + time.strftime("%Y-%m-%d", time.localtime(now)) + ".csv"), HEAD, row)
         except OSError:
             pass
 

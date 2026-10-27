@@ -2,9 +2,9 @@
 
   python tools/fp_eval.py cv   export.csv [--scale zone|label] [--purge-s N] [--cv blocks|visits]
   python tools/fp_eval.py live fingerprints.json snaps.txt export.csv
-  python tools/fp_eval.py weak export.csv zone-v2-*.csv [--cap 300] [--norm raw]
+  python tools/fp_eval.py weak export.csv zone-v3-*.csv [--cap 300] [--norm raw]
 
-weak: rows of the zone-v2 log (nlpi/zone_log.py) with a non-empty weak_label (passive rules, nlpi/weak_label.py) are used as
+weak: rows of the zone-v3 log (nlpi/zone_log.py) that the offline rules of tools/weak_labels.py label (empty = unsure) are used as
 labelled samples: train weak -> test on the manual labels, train manual -> test on the weak rows, and CV on the weak rows blocked
 by day (fewer than 2 days: 4 contiguous time blocks with a 60 s purge, flagged). Per zone at most --cap rows (evenly spaced).
 
@@ -27,6 +27,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import statistics
 import sys
 from collections import Counter, defaultdict
@@ -266,19 +267,19 @@ def cmd_cv(a):
 
 
 def load_weak(paths, norm):
-    """Rows of zone-v2 CSVs with a weak_label; returns (rows, day_of_row list)."""
+    """Rows of zone-v3 CSVs that tools/weak_labels.py labels (offline rules); returns (rows, day_of_row list)."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from weak_labels import label_csv
     rows, days = [], []
-    for path in paths:
-        with open(path, encoding="utf-8", newline="") as fh:
-            for r in csv.DictReader(fh):
-                if not r.get("weak_label"):
-                    continue
-                ts = datetime.strptime(r["ts"], "%Y-%m-%dT%H:%M:%S")
-                ble = {n: FLOOR_BLE if num(r.get(n + "_phone")) is None else max(num(r[n + "_phone"]), FLOOR_BLE) for n in NODES}
-                motion = {n: num(r.get("csi_%s_motion" % n)) for n in CSI_NODES}
-                still = {n: num(r.get("csi_%s_still" % n)) for n in CSI_NODES}
-                rows.append(Row(ts.timestamp(), r["weak_label"], ble, motion, still, norm))
-                days.append(ts.strftime("%Y-%m-%d"))
+    for r, label, _ in label_csv(paths):
+        if not label:
+            continue
+        ts = datetime.strptime(r["ts"], "%Y-%m-%dT%H:%M:%S")
+        ble = {n: FLOOR_BLE if num(r.get(n + "_phone")) is None else max(num(r[n + "_phone"]), FLOOR_BLE) for n in NODES}
+        motion = {n: num(r.get("csi_%s_motion" % n)) for n in CSI_NODES}
+        still = {n: num(r.get("csi_%s_still" % n)) for n in CSI_NODES}
+        rows.append(Row(ts.timestamp(), label, ble, motion, still, norm))
+        days.append(ts.strftime("%Y-%m-%d"))
     order = sorted(range(len(rows)), key=lambda i: rows[i].ts)
     return [rows[i] for i in order], [days[i] for i in order]
 
@@ -304,7 +305,7 @@ def cmd_weak(a):
     print("manual labels: %d %s" % (len(manual), dict(Counter(r.zone for r in manual))))
     print("weak rows: %d %s over days %s" % (len(weak), dict(wz), sorted(set(days))))
     if len(wz) < 2:
-        print("weak rows cover fewer than 2 zones: nothing to evaluate yet (collect more; see weak_label.py rules)")
+        print("weak rows cover fewer than 2 zones: nothing to evaluate yet (collect more; see tools/weak_labels.py rules)")
         return
     wcap = cap_rows(weak, a.cap)
     methods = ["median", "kit3", "knn5"]
@@ -439,7 +440,7 @@ def main():
     c.add_argument("--ble-nodes", default=",".join(NODES), help="comma list of BLE nodes used in the distance")
     wk = sub.add_parser("weak")
     wk.add_argument("csv", help="manual label export")
-    wk.add_argument("weak", nargs="+", help="zone-v2-*.csv files")
+    wk.add_argument("weak", nargs="+", help="zone-v3-*.csv files")
     wk.add_argument("--cap", type=int, default=300, help="max rows per zone used for training (evenly spaced)")
     wk.add_argument("--norm", choices=["raw", "ratio", "logratio"], default="raw")
     wk.add_argument("--scale", choices=["zone", "label"], default="zone")
