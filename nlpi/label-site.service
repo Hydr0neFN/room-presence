@@ -1,0 +1,16 @@
+[Unit]
+Description=Position labelling site (LAN only) for presence analysis
+After=mosquitto.service network-online.target
+
+[Service]
+EnvironmentFile=/etc/presence-ble.env
+Environment=DB_FILE=/var/lib/presence-labels/labels.db
+Environment=BIND=10.0.0.20
+Environment=PORT=8097
+ExecStart=/usr/bin/python3 /opt/label-site/label_site.py
+Restart=always
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

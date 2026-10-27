@@ -167,3 +167,12 @@ ldeskcyd-HEAD1a663a7.bin`), heap 140 kB, MQTT data updating. The owner's NLDeskC
 - Any reading >= `EVENT_W` (1000 W) opens an event, closed after 3 readings below: `events.csv`
   (`start,end,secs,peak_w,mean_w,kwh_est,pc_w_mean`). House load minus `pc_w` ~ the kitchen/other load.
 - Analyse: `scp nl-pi-lan:/var/lib/powermon-log/*.csv .`; zone context (kitchen) is in the HA recorder (`sensor.yui_room_zone`).
+
+## Position labelling site (ground truth for analysis)
+
+- `nlpi/label_site.py` as `label-site.service` on nl-pi: `http://10.0.0.20:8097/` (LAN only, bound to 10.0.0.20, no auth; 8099
+  is taken by another service). Four zone buttons; a press stores the last 15 s of phone / watch (IRK-labelled), non-stationary
+  BLE and CSI per node in SQLite `/var/lib/presence-labels/labels.db` (`labels`, `samples`), undo button, CSV export
+  `/api/export.csv`, MQTT event `presence/label/event`.
+- Use: stand in a zone, press its button, repeat at different times/poses; later compare labels with `sensor.yui_room_zone`
+  history and re-fit fingerprints.
