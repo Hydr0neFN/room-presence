@@ -1,0 +1,121 @@
+--- /c/Users/Ruanyouyi/Documents/PlatformIO/Projects/NLDeskCYD/platformio.ini	2026-09-27 01:19:10.282608400 +0200
++++ cyd-work/platformio.ini	2026-10-27 11:39:37.931375200 +0100
+@@ -14,7 +14,7 @@
+ extra_configs = secrets.ini
+ 
+ [env]
+-platform = espressif32
++platform = espressif32@7.1.0
+ board = esp32dev
+ framework = arduino
+ monitor_speed = 115200
+@@ -26,7 +26,18 @@
+     https://github.com/PaulStoffregen/XPT2046_Touchscreen.git#v1.4
+     lvgl/lvgl@9.5.0
+     knolleary/PubSubClient@^2.8
++    h2zero/NimBLE-Arduino@^2.3.0
+ build_flags =
++    ; BLE presence scanner (src/ble_presence.cpp, room-presence project): node "cyd",
++    ; publisher-fn API, NimBLE trimmed to a passive observer.
++    -D BLE_PUBLISH_FN_API
++    -D BLE_NODE_NAME=\"cyd\"
++    -D CONFIG_BT_NIMBLE_ROLE_CENTRAL_DISABLED
++    -D CONFIG_BT_NIMBLE_ROLE_PERIPHERAL_DISABLED
++    -D CONFIG_BT_NIMBLE_ROLE_BROADCASTER_DISABLED
++    -D CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
++    -D CONFIG_BT_NIMBLE_LOG_LEVEL=5
++    -D CONFIG_NIMBLE_CPP_LOG_LEVEL=0
+     -D LV_CONF_INCLUDE_SIMPLE
+     -D LV_LVGL_H_INCLUDE_SIMPLE
+     -I include
+--- /c/Users/Ruanyouyi/Documents/PlatformIO/Projects/NLDeskCYD/src/net.cpp	2026-09-27 14:30:42.016837400 +0200
++++ cyd-work/src/net.cpp	2026-10-27 11:39:37.932391900 +0100
+@@ -3,6 +3,8 @@
+ #include <ArduinoOTA.h>
+ #include <PubSubClient.h>
+ #include <WiFi.h>
++
++#include "ble_presence.h"
+ #include <math.h>
+ #include <time.h>
+ 
+@@ -276,6 +278,7 @@
+ }
+ 
+ static void on_message(char *topic, uint8_t *payload, unsigned int len) {
++  if (blepresence::onMessage(topic, payload, len)) return;  // presence/... (IRK config, cmd)
+   static constexpr size_t BASE_LEN = sizeof(TOPIC_BASE) - 1;
+   static constexpr char HIST[] = "hist/";
+   if (strncmp(topic, TOPIC_BASE, BASE_LEN) != 0) return;
+@@ -394,6 +397,7 @@
+   s_mqtt.subscribe(TOPIC_BASE "weather", 1);
+   s_mqtt.subscribe(TOPIC_BASE "forecast", 1);
+   s_mqtt.subscribe(TOPIC_PANEL "bench", 0);
++  blepresence::subscribe([](const char *t) { s_mqtt.subscribe(t); });
+   return true;
+ }
+ 
+@@ -403,6 +407,12 @@
+   portEXIT_CRITICAL(&s_mux);
+ }
+ 
++// Stop/resume the BLE scanner through its own command path ("off"/"on" on presence/cyd/cmd).
++static void ble_scan_pause(bool pause) {
++  const char *cmd = pause ? "off" : "on";
++  blepresence::onMessage("presence/" BLE_NODE_NAME "/cmd", (const uint8_t *)cmd, strlen(cmd));
++}
++
+ static void setup_ota() {
+   ArduinoOTA.setHostname(OTA_HOSTNAME);
+   ArduinoOTA.setPassword(OTA_PASSWORD);
+@@ -410,6 +420,7 @@
+     // The OTA erases ~1.2 MB of flash up front, stalling both cores for
+     // seconds; the 5 s loop watchdog (main.cpp) would reboot mid-upload.
+     disableLoopWDT();
++    ble_scan_pause(true);  // radio + heap are needed for the upload
+     portENTER_CRITICAL(&s_mux);
+     s_model.ota_active = true;
+     s_model.ota_percent = 0;
+@@ -427,6 +438,7 @@
+     s_model.ota_active = false;
+     portEXIT_CRITICAL(&s_mux);
+     enableLoopWDT();
++    ble_scan_pause(false);
+   });
+   ArduinoOTA.begin();
+ }
+@@ -461,7 +473,8 @@
+ static void net_task(void *) {
+   WiFi.mode(WIFI_STA);
+   WiFi.setHostname(OTA_HOSTNAME);
+-  WiFi.setSleep(false);  // modem sleep adds 100+ ms to every command
++  // WiFi/BT coexistence aborts with modem sleep fully off; MIN_MODEM costs a few ms per command.
++  WiFi.setSleep(WIFI_PS_MIN_MODEM);
+   WiFi.setAutoReconnect(true);
+   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+ 
+@@ -471,7 +484,7 @@
+   s_mqtt.setCallback(on_message);
+   s_mqtt.setBufferSize(1280);  // history payloads ~450 B, discovery ~300 B
+   s_mqtt.setSocketTimeout(5);
+-  s_mqtt.setKeepAlive(30);
++  s_mqtt.setKeepAlive(60);  // BLE coexistence can stall WiFi for seconds
+ 
+   bool ota_started = false;
+   unsigned long next_try = 0, next_rssi = 0, next_perf = 0, next_ldr = 0;
+@@ -495,6 +508,15 @@
+         }
+       } else {
+         s_mqtt.loop();
++        // BLE presence scanner (node "cyd"): start once WiFi + MQTT have been up for a while.
++        static bool ble_started = false;
++        if (!ble_started && now > 30000) {
++          ble_started = true;
++          blepresence::setup([](const char *t, const char *p, bool r) {
++            return s_mqtt.connected() && s_mqtt.publish(t, p, r);
++          });
++        }
++        blepresence::loop();
+         Cmd c;
+         while (xQueueReceive(s_cmd_queue, &c, 0) == pdTRUE) {
+           const char *t = c.target == CmdTarget::BASIL ? TOPIC_CMD_BASIL : TOPIC_CMD_LIGHTBAR;

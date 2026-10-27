@@ -3,18 +3,19 @@
 Zones: KITCHEN / WORK DESK / PC DESK / BED / home (place unknown) / away.
 Method (owner): location = comparing wireless signal strength (BLE RSSI of the owner's PHONE) between anchors; the kitchen radar is only a kitchen hint; PC idle time is extra evidence for the PC desk. (This file is the phase report; the harness refused the name REPORT.md.)
 
-## Status at a glance
+## Status at a glance (updated 2026-10-27 ~12:00, daytime flashing done)
 | Piece | State |
 |---|---|
-| Flashing / OTA | NOTHING was flashed tonight (owner window closed). All devices untouched. |
-| lightbar2mqtt BLE firmware | Built, critic-reviewed (2 rounds), NOT flashed. Branch `ble-presence` @ c959557. Image `firmware\lightbar2mqtt-ble-presence.bin`, 1,047,344 B (76.9 % of the 1.25 MB OTA slot), sha256 `be0eaaf9ea344d27ef4a47240e7656a8a8aac9b62b92a6a56e0c44c227944e92` |
-| LightController BLE | Code-only port done as a patch (`lightcontroller-ble-presence.patch`), builds (85.7 % of the 1.9 MB slot), NOT applied to the owner's tree, NOT flashed. Section 6 |
-| nl-pi BLE scanner | Code ready (`nlpi\`), NOT installed (owner runs `install_nlpi.sh` in the morning; nl-pi Bluetooth is non-functional until then) |
-| HA package | LIVE (deployed + HA restarted once at 01:25 after `check_config`; verified with fake MQTT, section 4) |
-| Automations | Installed, master switch `input_boolean.room_presence_automations` is OFF |
+| nl-pi BLE scanner | LIVE since 08:36 (`install_nlpi.sh`, service `presence-ble`, broker user `blepresence`), publishes `presence/nlpi/apple`; hci0 scans although its address reads AA:AA:AA:AA:AA:AA |
+| lightbar2mqtt BLE (node `pcdesk`) | FLASHED by OTA 08:38 (branch `ble-presence`), 5+ min verified, still running (heap 144 kB, `mqtt_connects` 1). See section 8 |
+| LightController BLE (node `workdesk`) | FLASHED by OTA 08:45 (patch applied to the owner's working tree, uncommitted), broker user `lcpresence`. Free heap ~55-60 kB. See section 8 |
+| NLDeskCYD | NOT done: BLE does not fit (heap 140 kB -> 61 kB). Rolled back. Section 8 |
+| Kitchen anchor | NOT done: ESP8266 Wi-Fi sniffing rejected, evaluation in section 8 |
+| HA package | LIVE (no change needed today: all nodes already defined) |
+| Automations | Installed, master switch `input_boolean.room_presence_automations` is OFF (owner calibrates first) |
+| IRK | Not loaded yet (owner extracts it from the Mac); nodes run in no-IRK fallback |
 | PC idle publisher | LIVE: Task Scheduler `PresencePcIdle` |
-| KitchenRadar | Already exposes distance/energy sensors in HA, no OTA needed |
-| NLDeskCYD | Untouched (best future pc_desk anchor, see below) |
+| KitchenRadar | Already exposes distance/energy sensors in HA |
 
 ## IRK IS EFFECTIVELY REQUIRED
 Without the phone's IRK the nodes can only use "strongest Apple advert of a non-stationary device" as the signal. That is unreliable: neighbours' phones, anyone visiting, and the owner's own phone as soon as it lies still for 5+ min (it then looks like the MacBooks and is filtered). The IRK lets every node recognise exactly the owner's phone (and watch) despite the rotating private address. Load it before calibrating.
@@ -32,7 +33,7 @@ Without the phone's IRK the nodes can only use "strongest Apple advert of a non-
 - Static Apple devices: 2 MacBooks wedged under the PC desk board and an iPad on a desk arm mount. They advertise all day with a fixed RSSI. See "Stationary filter".
 - Anchors: the lightbar ESP32-C3 sits under the PC desk in the far-left back corner next to a power strip and cable mess, shadowed by the owner's body when seated and right beside the Macs; nl-pi lies on the floor under the bed in front of a metal radiator among power adapters, with the TP-Link AX10 (2.4 GHz AP) next to it; LightController sits at the work bench; the NLDeskCYD display sits ON TOP of the PC desk and would be the best pc_desk anchor (add BLE to it in daytime if heap allows, not done). The room is one long rectangle: kitchen/door at one end, window and bed at the far end, PC desk and work bench on the opposite long walls near the bed end. Consequences: pcdesk and nlpi are nearly collinear and both distorted by metal and 2.4 GHz traffic, so never trust "strongest anchor wins": use the calibrated fingerprints. Calibrate with the same phone orientation you normally carry it in.
 
-## MORNING CHECKLIST (in order)
+## MORNING CHECKLIST (in order) - steps 1, 3 and 4 were done on 2026-10-27 daytime, see section 8
 1. nl-pi install (installs packages; Pi stays up): copy `nlpi\nlpi_ble.py`, `nlpi\stationary.py`, `nlpi\presence-ble.service`, `nlpi\install_nlpi.sh` to `root@10.0.0.20:/tmp/` and run `ssh nl-pi-lan "bash /tmp/install_nlpi.sh"`. It apt-installs pi-bluetooth bluez python3-bleak python3-paho-mqtt (also upgrades libglib2.0-0 and libasound2), creates broker user `blepresence`, starts `presence-ble.service` (publishes `presence/nlpi/apple`). If `hci0` still has no address, reboot the Pi once. HA already logs `habluetooth ... hci0 (AA:AA:AA:AA:AA:AA) Failed to force stop scanner` errors (HA container lacks NET_ADMIN, unrelated to this work; they should stop once bluez provides a real adapter). Rollback: `systemctl disable --now presence-ble bluetooth`.
 2. IRK extraction and publish (section above). Phone mandatory, watch optional.
 3. Flash the lightbar (section 2), watch 5 min: in HA `sensor.rp_pcdesk_apple_best` is a number, `sensor.rp_pcdesk_heap` > 60000, `sensor.rp_pcdesk_phone_loaded` = 1, light bar still controllable, MQTT reconnect count not climbing.
@@ -94,6 +95,17 @@ Live entities (verified): binary_sensor.kitchenradar_presence, sensor.kitchenrad
 
 ## 7. Does the TP-Link AX10 AP expose per-client RSSI?
 Not verified against the device (it was not located on the LAN by a title scan of the neighbour table, and nothing was logged into or changed). From general knowledge only: the Archer AX10 stock web UI lists associated wireless clients (Network/Wireless Statistics: MAC, packets) and I know of no documented local API with per-client RSSI; if it is in access-point mode, expect no usable signal data. The main APs may be UniFi (the gateway is 10.0.0.1): a UniFi controller does report per-client `rssi`/`signal` for the phone, which would be a real second signal source for the same room question but belongs to the AP the phone is attached to, not to a room. Treat as unverified; decide in daytime whether it is worth a look.
+
+## 8. Live bring-up log (2026-10-27 daytime, owner authorised flashing)
+- nl-pi: `install_nlpi.sh` ran clean (08:36); `presence-ble` active, `presence/nlpi/apple` publishes every 3 s. Rollback unchanged.
+- lightbar (10.0.0.87): `pio run -e esp32-c3-pro-mini-ota -t upload` OK 08:38. Watched 5 min: heap 144,4xx stable, `mqtt_connects` 1, WiFi rssi -37..-44, `on`/`off` via `lightbar2mqtt/l2m_44BD8D4BCE78/0xa11ce0/command` worked and the bar was restored OFF, `sensor.rp_pcdesk_*` available in HA. At ~09:52 it restarted with reset_reason POWERON (power cycle, not a crash); BLE came back by itself.
+- LightController (10.0.0.93): rollback image first: `rollback\lightcontroller-prepatch-2026-10-27.bin` (rebuild of the owner's pre-patch tree with `ENABLE_MQTT 0`, not byte-identical to what ran). Patch applied with `git apply` (no commit/stash), `src/config.h` (gitignored) now `ENABLE_MQTT 1`, `MQTT_USER "lcpresence"`; new mosquitto user `lcpresence` (password only in the gitignored config.h and `lc-port\lcpresence.pass.local`; broker `passwd` backed up as `/etc/mosquitto/passwd.bak-lcpresence`). Reviewed by `critic` (no blocking findings). `pio run -e ota -t upload` OK 08:45. Watched 400 s: `presence/workdesk/apple` heap 60.5 kB, `lightctrl/online` once (no reconnect), later HA `fan.wo_shi_fans` and `light.channel_b` available (HomeKit link fine). The controllability test through HA could not be done (no HA API token), it was judged by availability and the state having changed in HA after the flash (owner use). It restarted at ~10:03 (uptime), BLE came back; heap 54-59 kB, scanner stays above its 40 kB stop threshold. Rollback: flash the prepatch bin through HomeSpan OTA (same espota route) or `git apply -R`.
+- NLDeskCYD (10.0.0.82): port built (`cyd-port.diff.txt`, flash 78.8 %) and flashed, then ROLLED BACK. Finding: linking NimBLE/BT stops Arduino's start-up release of the BT controller memory, so free heap after boot fell from 140 kB to 61 kB before the scanner even started (the scanner refuses below 70 kB), which would put LVGL (alloc failure = frozen UI) at risk. Panel is back on the build of HEAD 1a663a7 (`rollback
+ldeskcyd-HEAD1a663a7.bin`), heap 140 kB, MQTT data updating. The owner's NLDeskCYD repo is untouched. Possible later: drop pages/sky buffers or use a different board.
+- OTA to the CYD from this PC FAILS ("No response from device": the device cannot connect back, the PC firewall only allows python from some peers); it works from nl-pi: copy `tools\espota_slow.py` + the bin to nl-pi and `python3 espota_slow.py -i 10.0.0.82 -p 3232 --auth=<secrets.ini ota_password> -f x.bin`. Also: the default PlatformIO `espressif32` platform was overwritten by the pioarduino one (LightController), so NLDeskCYD no longer builds in the default core; use `PLATFORMIO_CORE_DIR=C:\pio-cyd` with `platform = espressif32@7.1.0` in a scratch copy (`C:\cyd-work`, scripts in `tools\`).
+- Kitchen anchor: evaluated, not built. (1) The NeoPixel D1 mini bit-bangs 173 WS2812B on GPIO4 (interrupts off ~5 ms per frame) and the ESP8266 SDK documents promiscuous mode as incompatible with a connected station, so sniffing risks the HA link and the main light function. (2) A sleeping iPhone sends sparse uplink frames, so most samples would be -100 and spoil the fingerprint. (3) The radar already gives the kitchen hint. Recommended instead: a 3 EUR ESP32-C3 in the kitchen running the lightbar firmware (node name `kitchen`; add it to the HA package and re-calibrate). For a future Wi-Fi approach: the likely iPhone is "R" at 10.0.0.121 with private MAC e2:8d:55:f0:12:0d (mDNS `_companion-link`, not verified as the owner's phone). KitchenLight, powermon, basil, FW13 untouched.
+- Nothing new was added to the HA package (no new nodes), no HA restart today.
+- Next for the owner: load the IRK, calibrate (`calibrate.py`), then enable `input_boolean.room_presence_automations`.
 
 ## Decisions taken (safe defaults)
 - No flashing, no apt installs on nl-pi, one HA restart (after check_config), backups `*.bak-2026-10-27`.
