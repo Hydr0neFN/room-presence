@@ -91,6 +91,12 @@ mqtt:
       state_topic: "presence/pcdesk/ble"
       value_template: "{{ value_json.restarts }}"
       expire_after: 120
+    - name: "RP pcdesk uptime"
+      unique_id: rp_pcdesk_uptime
+      state_topic: "presence/pcdesk/ble"
+      value_template: "{{ value_json.up }}"
+      unit_of_measurement: s
+      expire_after: 120
     # BLE scanner health (firmware ble_presence.cpp watchdog, presence/workdesk/ble every 30 s):
     # state 1 = scanning, 2 = deferred start after a crash reset, 3 = init failed (retrying), 0 = off
     - name: "RP workdesk ble state"
@@ -107,6 +113,12 @@ mqtt:
       unique_id: rp_workdesk_scan_restarts
       state_topic: "presence/workdesk/ble"
       value_template: "{{ value_json.restarts }}"
+      expire_after: 120
+    - name: "RP workdesk uptime"
+      unique_id: rp_workdesk_uptime
+      state_topic: "presence/workdesk/ble"
+      value_template: "{{ value_json.up }}"
+      unit_of_measurement: s
       expire_after: 120
     # BLE scanner health (firmware ble_presence.cpp watchdog, presence/cyd/ble every 30 s):
     # state 1 = scanning, 2 = deferred start after a crash reset, 3 = init failed (retrying), 0 = off
@@ -125,6 +137,12 @@ mqtt:
       state_topic: "presence/cyd/ble"
       value_template: "{{ value_json.restarts }}"
       expire_after: 120
+    - name: "RP cyd uptime"
+      unique_id: rp_cyd_uptime
+      state_topic: "presence/cyd/ble"
+      value_template: "{{ value_json.up }}"
+      unit_of_measurement: s
+      expire_after: 120
     # BLE scanner health (firmware ble_presence.cpp watchdog, presence/kitchen/ble every 30 s):
     # state 1 = scanning, 2 = deferred start after a crash reset, 3 = init failed (retrying), 0 = off
     - name: "RP kitchen ble state"
@@ -141,6 +159,12 @@ mqtt:
       unique_id: rp_kitchen_scan_restarts
       state_topic: "presence/kitchen/ble"
       value_template: "{{ value_json.restarts }}"
+      expire_after: 120
+    - name: "RP kitchen uptime"
+      unique_id: rp_kitchen_uptime
+      state_topic: "presence/kitchen/ble"
+      value_template: "{{ value_json.up }}"
+      unit_of_measurement: s
       expire_after: 120
     - name: "RP pcdesk apple best"
       unique_id: rp_pcdesk_apple_best
