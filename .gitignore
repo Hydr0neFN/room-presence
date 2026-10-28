@@ -10,3 +10,4 @@ lc-port/orig/
 *.local
 *.log
 cyd_watch*.log
+analysis/
