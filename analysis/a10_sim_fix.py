@@ -19,7 +19,8 @@ lab = [l for _, l, _ in wl]
 OLD = dict(use_stale=False, nodes=NODES, w={}, kitchen_evidence=False, bed=False, pc_hold=60, radar_hold=0, dwell=0)
 NEW = dict(use_stale=True, nodes=['pcdesk', 'cyd', 'workdesk', 'kitchen'],
            w={'pcdesk': 1.0, 'cyd': 1.0, 'workdesk': 0.5, 'kitchen': 0.5}, kitchen_evidence=True, bed=True,
-           pc_hold=300, radar_hold=30, dwell=45)
+           pc_hold=300, radar_hold=30, dwell=45, kit_radar_only=False)
+NEW2 = dict(NEW, kit_radar_only=True)
 
 
 def run(cfg, verbose=False):
@@ -70,7 +71,11 @@ def run(cfg, verbose=False):
         radar_h = radar or (i - last_radar) * 10 <= cfg['radar_hold']
         pmax = num(r['power_max120']) or 0
         klag = num(r['kitchen_light_age_s'])
-        k_ev = radar_h or pmax >= 1000 or (klag is not None and klag <= 900)
+        if cfg.get('kit_radar_only'):
+            # radar is the only owner-located evidence; power / kitchen light only as a tiebreak within 2 min of the radar
+            k_ev = radar_h or ((i - last_radar) * 10 <= 120 and (pmax >= 1000 or (klag is not None and klag <= 900)))
+        else:
+            k_ev = radar_h or pmax >= 1000 or (klag is not None and klag <= 900)
         m = int(r['ts'][11:13]) * 60 + int(r['ts'][14:16])
         sds = []
         for n in ('cyd', 'kitchen'):
@@ -144,6 +149,13 @@ if __name__ == '__main__':
     print("logged zone/fp (production):")
     report('logged', [r['zone'] for r in rows], [r['fp_zone'] for r in rows])
     report('NEW', *run(NEW))
+    report('NEW2', *run(NEW2))
+    # kitchen rows by evidence kind under NEW vs NEW2
+    z1, _ = run(NEW); z2, _ = run(NEW2)
+    diff = [i for i in range(len(rows)) if z1[i] != z2[i]]
+    print('rows where NEW2 differs from NEW:', len(diff), Counter((z1[i], z2[i]) for i in diff).most_common(6))
+    pcw = [i for i in diff if rows[i]['pc_online'] == 'on' and rows[i]['pc_locked'] == 'off']
+    print('  of those with PC unlocked:', len(pcw))
     for name, mod in [('-stale', dict(use_stale=False)), ('-kitEv', dict(kitchen_evidence=False)), ('-bed', dict(bed=False)),
                       ('-hold', dict(pc_hold=60, radar_hold=0, dwell=0)), ('-nodeW', dict(nodes=NODES, w={}))]:
         cfg = dict(NEW); cfg.update(mod)

@@ -987,8 +987,7 @@ template:
       #   kitchen radar hint (held 30 s)         -> kitchen
       #   no node hears the phone (< floor)      -> home
       #   night bed rule                         -> bed
-      #   fingerprint zone; 'kitchen' only with evidence (radar, powermon max120 >= 1000 W, kitchen light operated
-      #   in the last 15 min), else home; no fingerprint zone -> home (legacy pcdesk/workdesk comparison only
+      #   fingerprint zone; 'kitchen' only with evidence (radar; power / light only within 2 min of the radar), else home; no fingerprint zone -> home (legacy pcdesk/workdesk comparison only
       #   when no fingerprints exist at all)
       # Minimum dwell: a change driven only by the fingerprint / fallback (not by PC activity, away, radar or the
       # night rule) waits until the current zone is 45 s old.
@@ -1039,6 +1038,96 @@ template:
           kitchen_distance_cm: "{{ states('sensor.kitchenradar_detection_distance') }}"
           kitchen_evidence: "{{ states('binary_sensor.rp_kitchen_evidence') }}"
           night_bed: "{{ states('binary_sensor.rp_night_bed') }}"
+      # Debug (dashboard view 定位校準 -> 除錯): which rule of 'Yui room zone' fired, and the per-zone fingerprint
+      # distance (same maths as 'RP fp zone', dB; lower = closer; hysteresis not applied). Display only.
+      - name: "RP zone reason"
+        unique_id: rp_zone_reason
+        icon: mdi:bug-outline
+        state: >
+          {% set pc_unlocked = is_state('binary_sensor.rp_pc_online', 'on')
+               and is_state('binary_sensor.rp_pc_locked', 'off') %}
+          {% set idle = states('sensor.rp_pc_idle') | float(9999) %}
+          {% set kitchen = is_state('binary_sensor.rp_kitchen_radar_hint', 'on') %}
+          {% set floor = states('input_number.rp_min_rssi') | float(-90) %}
+          {% set mx = [states('sensor.rp_pcdesk_signal') | float(-127), states('sensor.rp_workdesk_signal') | float(-127),
+                       states('sensor.rp_nlpi_signal') | float(-127), states('sensor.rp_kitchen_signal') | float(-127),
+                       states('sensor.rp_cyd_signal') | float(-127)] | max %}
+          {% set fp = states('sensor.rp_fp_zone') %}
+          {% set z = states('sensor.yui_room_zone') %}
+          {% if pc_unlocked and idle < 60 %}PC 使用中（閒置 < 60 秒）
+          {% elif is_state('binary_sensor.yui_home', 'off') %}不在家
+          {% elif z == 'pc_desk' and pc_unlocked and idle < 300 and not kitchen %}PC 已解鎖、閒置 < 300 秒，維持電腦桌
+          {% elif kitchen %}廚房雷達（< {{ states('input_number.rp_kitchen_max_cm') | int(250) }} cm）
+          {% elif mx < floor %}所有節點都聽不到手機（< {{ floor | int }} dBm）
+          {% elif is_state('binary_sensor.rp_night_bed', 'on') %}夜間床規則
+          {% elif fp not in ['none', 'unknown', 'unavailable'] %}指紋：{{ fp }}{% if fp == 'kitchen' and not is_state('binary_sensor.rp_kitchen_evidence', 'on') %}（缺少廚房證據，改為在家）{% endif %}
+          {% else %}沒有指紋，在家
+          {% endif %}
+        attributes:
+          fp_zone: "{{ states('sensor.rp_fp_zone') }}"
+          zone: "{{ states('sensor.yui_room_zone') }}"
+          radar_hint: "{{ states('binary_sensor.rp_kitchen_radar_hint') }}"
+          radar_recent: "{{ states('binary_sensor.rp_kitchen_radar_recent') }}"
+          power_max120_w: "{{ states('sensor.rp_power_max120') }}"
+          kitchen_light_age_s: "{{ (now().timestamp() - state_attr('input_datetime.rp_kitchen_light_op', 'timestamp') | float(0)) | int }}"
+          kitchen_evidence: "{{ states('binary_sensor.rp_kitchen_evidence') }}"
+          night_bed: "{{ states('binary_sensor.rp_night_bed') }}"
+          pc_online: "{{ states('binary_sensor.rp_pc_online') }}"
+          pc_locked: "{{ states('binary_sensor.rp_pc_locked') }}"
+          pc_idle_s: "{{ states('sensor.rp_pc_idle') }}"
+      - name: "RP fp debug"
+        unique_id: rp_fp_debug
+        icon: mdi:ruler
+        state: "{{ states('sensor.rp_fp_zone') }}"
+        attributes:
+          dist: >
+            {% set nodes = state_attr('sensor.rp_fingerprints', 'nodes') or [] %}
+            {% set zones = state_attr('sensor.rp_fingerprints', 'zones') or {} %}
+            {% set feat = state_attr('sensor.rp_fingerprints', 'feat') or {} %}
+            {% set fz = feat.get('zones') or {} %}
+            {% set fs = feat.get('scale') or {} %}
+            {% set wt = {'cyd': 1.0, 'pcdesk': 1.0, 'workdesk': 0.5, 'kitchen': 0.5} %}
+            {% set w = states('input_number.rp_feat_weight_db') | float(0) %}
+            {% set use = namespace(l=[], tw=0) %}
+            {% set cur = namespace(l=[]) %}
+            {% set out = namespace(l=[]) %}
+            {% for n in nodes %}
+              {% if n != 'nlpi' and not is_state('binary_sensor.rp_' ~ n ~ '_ble_stale', 'on') %}
+                {% set use.l = use.l + [n] %}{% set use.tw = use.tw + wt.get(n, 1.0) %}
+              {% endif %}
+            {% endfor %}
+            {% if w > 0 %}
+              {% for fn in (feat.get('names') or []) %}
+                {% set p = fn.split('_') %}
+                {% set eid = ('sensor.rp_' ~ p[1] ~ '_csi_still') if (p[0] == 'csi' and p[2] == 'still') else ('sensor.rp_link_' ~ p[1] ~ '_motion') %}
+                {% set x = states(eid) | float(none) %}
+                {% if x is not none %}{% set cur.l = cur.l + [[fn, x]] %}{% endif %}
+              {% endfor %}
+            {% endif %}
+            {% if use.tw >= 1.5 %}
+              {% for z, f in zones.items() %}
+                {% set t = namespace(d=0, k=0) %}
+                {% for n in use.l %}
+                  {% set sg = [states('sensor.rp_' ~ n ~ '_signal') | float(-127), -100] | max %}
+                  {% set t.d = t.d + wt.get(n, 1.0) * (sg - (f[n] | float(-100))) ** 2 %}
+                {% endfor %}
+                {% set fv = fz.get(z) or {} %}
+                {% for fn, x in cur.l %}
+                  {% set mu = fv.get(fn) | float(none) %}
+                  {% set sd = fs.get(fn) | float(0) %}
+                  {% if mu is not none and sd > 0 %}{% set t.d = t.d + (w * (x - mu) / sd) ** 2 %}{% set t.k = t.k + 1 %}{% endif %}
+                {% endfor %}
+                {% set out.l = out.l + [[z, ((t.d / ([use.tw + t.k, 1] | max)) ** 0.5) | round(1)]] %}
+              {% endfor %}
+            {% endif %}
+            {% for z, r in out.l | sort(attribute=1) %}{{ z }} {{ r }}{% if not loop.last %} | {% endif %}{% endfor %}
+          used_nodes: >
+            {% set ns = namespace(l=[]) %}
+            {% for n in (state_attr('sensor.rp_fingerprints', 'nodes') or []) %}
+              {% if n != 'nlpi' and not is_state('binary_sensor.rp_' ~ n ~ '_ble_stale', 'on') %}{% set ns.l = ns.l + [n] %}{% endif %}
+            {% endfor %}
+            {{ ns.l | join(',') }}
+          feature_weight_db: "{{ states('input_number.rp_feat_weight_db') }}"
   - binary_sensor:
       - name: "Room zone kitchen"
         unique_id: room_zone_kitchen
@@ -1133,8 +1222,8 @@ template:
             {% endfor %}
             {{ ns.l | join(',') }}
       # --- kitchen evidence. Radar hint = presence on and closer than rp_kitchen_max_cm, released 30 s late
-      # (the radar flickers). The fingerprint may only say 'kitchen' with evidence: the radar hint, the
-      # powermon at >= 1000 W within 120 s, or the kitchen light operated within the last 15 min.
+      # (the radar flickers). The fingerprint may only say 'kitchen' with evidence: the radar hint, or (radar
+      # hint within the last 2 min AND (powermon >= 1000 W within 120 s or kitchen light operated within 15 min)).
       - name: "RP kitchen radar hint"
         unique_id: rp_kitchen_radar_hint
         delay_off: "00:00:30"
@@ -1142,12 +1231,20 @@ template:
           {{ is_state('binary_sensor.kitchenradar_presence', 'on')
              and states('sensor.kitchenradar_detection_distance') | float(9999)
                  < states('input_number.rp_kitchen_max_cm') | float(250) }}
+      # Only the radar is owner-located evidence (power / light are house-wide: the owner at the PC desk was
+      # shown 'kitchen' 13:28-13:32 on 2026-10-28 because 1800 W + the light counted). Power and light are a
+      # tiebreak only while the radar saw someone within the last 2 min (hint is held 30 s, +90 s here).
+      - name: "RP kitchen radar recent"
+        unique_id: rp_kitchen_radar_recent
+        delay_off: "00:01:30"
+        state: "{{ is_state('binary_sensor.rp_kitchen_radar_hint', 'on') }}"
       - name: "RP kitchen evidence"
         unique_id: rp_kitchen_evidence
         state: >
           {{ is_state('binary_sensor.rp_kitchen_radar_hint', 'on')
-             or states('sensor.rp_power_max120') | float(0) >= 1000
-             or now().timestamp() - state_attr('input_datetime.rp_kitchen_light_op', 'timestamp') | float(0) <= 900 }}
+             or (is_state('binary_sensor.rp_kitchen_radar_recent', 'on')
+                 and (states('sensor.rp_power_max120') | float(0) >= 1000
+                      or now().timestamp() - state_attr('input_datetime.rp_kitchen_light_op', 'timestamp') | float(0) <= 900)) }}
       # --- night bed rule: 00:30-07:30, owner home, PC idle > 30 min (or off / locked), no kitchen radar,
       # phone RSSI spread <= 3.5 dB over the last 10 min on both cyd and kitchen (windows >= 80 % covered).
       - name: "RP night bed"

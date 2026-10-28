@@ -142,3 +142,63 @@
                 entity_id: button.rp_calibrate_clear_bed
               confirmation:
                 text: 清除「床」的指紋？
+
+  # ================================================================== #
+  # 5. Room presence debug (定位除錯): why the zone is what it is (read-only)
+  # ================================================================== #
+  - title: 定位除錯
+    path: presence-debug
+    icon: mdi:bug-outline
+    type: sections
+    max_columns: 2
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: 為什麼是這個區域
+          - type: markdown
+            grid_options:
+              columns: full
+            content: >-
+              ## 區域：{{ states('sensor.yui_room_zone') }}
+
+              **判斷依據**：{{ states('sensor.rp_zone_reason') }}
+
+              **指紋最近區域**：{{ states('sensor.rp_fp_zone') }}
+              （CSI 特徵權重 {{ state_attr('sensor.rp_fp_debug', 'feature_weight_db') }} dB）
+
+              **各區距離（dB，越小越近）**：{{ state_attr('sensor.rp_fp_debug', 'dist') or '（尚無指紋或節點不足）' }}
+
+              參與比對的節點：{{ state_attr('sensor.rp_fp_debug', 'used_nodes') or '無' }}
+          - type: markdown
+            grid_options:
+              columns: full
+            title: 各節點手機訊號
+            content: >-
+              | 節點 | 手機 RSSI (dBm) | 失聯(stale) | CSI 筆數 |
+              |---|---|---|---|
+              {% for n in ['pcdesk', 'cyd', 'workdesk', 'kitchen', 'nlpi'] -%}
+              | {{ n }} | {{ states('sensor.rp_' ~ n ~ '_signal') }} | {{ '是' if is_state('binary_sensor.rp_' ~ n ~ '_ble_stale', 'on') else '否' }} | {{ states('sensor.rp_' ~ n ~ '_csi_n') }} |
+              {% endfor %}
+          - type: markdown
+            grid_options:
+              columns: full
+            title: 證據旗標
+            content: >-
+              | 項目 | 狀態 |
+              |---|---|
+              | 廚房雷達（近距離） | {{ states('binary_sensor.rp_kitchen_radar_hint') }}（距離 {{ states('sensor.kitchenradar_detection_distance') }} cm） |
+              | 雷達 2 分鐘內有人 | {{ states('binary_sensor.rp_kitchen_radar_recent') }} |
+              | 電力（120 秒最大值） | {{ states('sensor.rp_power_max120') }} W |
+              | 廚房燈上次操作 | {{ state_attr('sensor.rp_zone_reason', 'kitchen_light_age_s') }} 秒前 |
+              | 廚房證據（綜合） | {{ states('binary_sensor.rp_kitchen_evidence') }} |
+              | 夜間床規則 | {{ states('binary_sensor.rp_night_bed') }} |
+              | 在家 | {{ states('binary_sensor.yui_home') }} |
+          - type: markdown
+            grid_options:
+              columns: full
+            title: 電腦狀態
+            content: >-
+              線上：{{ states('binary_sensor.rp_pc_online') }}；
+              鎖定：{{ states('binary_sensor.rp_pc_locked') }}；
+              閒置：{{ states('sensor.rp_pc_idle') }} 秒
