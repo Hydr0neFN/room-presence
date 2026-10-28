@@ -1,0 +1,43 @@
+rows 7162 2026-10-27T17:03:30 -> 2026-10-28T12:57:08 home rows 5688
+OLDsim  transitions 141  segs<60s  57  median seg    65s | home-rows 5688 shares kitchen 65.7%, pc_desk 29.9%, bed 2.9%, work_desk 1.0%, home 0.5%
+        vs weak labels (1904 rows): zone acc 97.6%  fp acc 14.5% | recall fp/zone: pc_desk 51/1515/1515, kitchen 225/343/347, work_desk 0/0/42
+        kitchen rows 3737 (816 with evidence now)
+logged zone/fp (production):
+logged  transitions 157  segs<60s  64  median seg    70s | home-rows 5688 shares kitchen 70.1%, pc_desk 28.0%, bed 1.2%, home 0.7%, work_desk 0.1%
+        vs weak labels (1904 rows): zone acc 97.6%  fp acc 13.2% | recall fp/zone: pc_desk 33/1515/1515, kitchen 218/343/347, work_desk 0/0/42
+        kitchen rows 3985 (1036 with evidence now)
+NEW     transitions  82  segs<60s  25  median seg    80s | home-rows 5688 shares bed 48.8%, pc_desk 37.8%, kitchen 10.6%, work_desk 1.7%, home 1.1%
+        vs weak labels (1904 rows): zone acc 97.4%  fp acc 58.5% | recall fp/zone: pc_desk 1065/1515/1515, kitchen 46/339/347, work_desk 3/0/42
+        kitchen rows 603 (593 with evidence now)
+-stale  transitions  69  segs<60s  19  median seg   175s | home-rows 5688 shares bed 44.4%, pc_desk 35.6%, kitchen 14.5%, home 5.2%, work_desk 0.3%
+        vs weak labels (1904 rows): zone acc 97.4%  fp acc 14.5% | recall fp/zone: pc_desk 52/1515/1515, kitchen 225/339/347, work_desk 0/0/42
+        kitchen rows 823 (813 with evidence now)
+-kitEv  transitions  79  segs<60s  24  median seg    80s | home-rows 5688 shares bed 48.8%, pc_desk 37.8%, kitchen 11.2%, work_desk 1.7%, home 0.5%
+        vs weak labels (1904 rows): zone acc 97.4%  fp acc 58.5% | recall fp/zone: pc_desk 1065/1515/1515, kitchen 46/339/347, work_desk 3/0/42
+        kitchen rows 637 (593 with evidence now)
+-bed    transitions  94  segs<60s  30  median seg    80s | home-rows 5688 shares bed 47.6%, pc_desk 37.8%, kitchen 10.6%, home 2.3%, work_desk 1.7%
+        vs weak labels (1904 rows): zone acc 97.4%  fp acc 58.5% | recall fp/zone: pc_desk 1065/1515/1515, kitchen 46/339/347, work_desk 3/0/42
+        kitchen rows 603 (593 with evidence now)
+-hold   transitions 172  segs<60s 100  median seg    40s | home-rows 5688 shares bed 49.2%, pc_desk 36.7%, kitchen 9.5%, work_desk 3.5%, home 1.1%
+        vs weak labels (1904 rows): zone acc 97.2%  fp acc 58.5% | recall fp/zone: pc_desk 1065/1515/1515, kitchen 46/333/347, work_desk 3/3/42
+        kitchen rows 539 (539 with evidence now)
+-nodeW  transitions  84  segs<60s  34  median seg    70s | home-rows 5688 shares bed 48.8%, pc_desk 38.0%, kitchen 9.6%, work_desk 2.3%, home 1.2%
+        vs weak labels (1904 rows): zone acc 97.4%  fp acc 60.6% | recall fp/zone: pc_desk 1104/1515/1515, kitchen 49/339/347, work_desk 0/0/42
+        kitchen rows 548 (538 with evidence now)
+--- node weight variants (fp acc vs weak labels is partly circular: weak pc_desk = PC rule)
+4n equal
+4n equal transitions  90  segs<60s  35  median seg    70s | home-rows 5688 shares bed 48.6%, pc_desk 37.9%, kitchen 10.6%, work_desk 1.8%, home 1.1%
+        vs weak labels (1904 rows): zone acc 97.4%  fp acc 58.6% | recall fp/zone: pc_desk 1056/1515/1515, kitchen 48/339/347, work_desk 11/0/42
+        kitchen rows 605 (595 with evidence now)
+4n flat0.5
+4n flat0.5 transitions  82  segs<60s  25  median seg    80s | home-rows 5688 shares bed 48.8%, pc_desk 37.8%, kitchen 10.6%, work_desk 1.7%, home 1.1%
+        vs weak labels (1904 rows): zone acc 97.4%  fp acc 58.5% | recall fp/zone: pc_desk 1065/1515/1515, kitchen 46/339/347, work_desk 3/0/42
+        kitchen rows 603 (593 with evidence now)
+4n cyd2
+4n cyd2 transitions  81  segs<60s  31  median seg    70s | home-rows 5688 shares bed 49.8%, pc_desk 37.8%, kitchen 10.3%, home 1.1%, work_desk 1.0%
+        vs weak labels (1904 rows): zone acc 97.4%  fp acc 56.4% | recall fp/zone: pc_desk 1025/1515/1515, kitchen 47/339/347, work_desk 2/0/42
+        kitchen rows 587 (577 with evidence now)
+5n equal
+5n equal transitions  84  segs<60s  34  median seg    70s | home-rows 5688 shares bed 48.8%, pc_desk 38.0%, kitchen 9.6%, work_desk 2.3%, home 1.2%
+        vs weak labels (1904 rows): zone acc 97.4%  fp acc 60.6% | recall fp/zone: pc_desk 1104/1515/1515, kitchen 49/339/347, work_desk 0/0/42
+        kitchen rows 548 (538 with evidence now)

@@ -1,0 +1,3 @@
+rows 7162 transitions 82 segs<60s 25 median seg 80s
+home-row shares: bed 48.8%, pc_desk 37.8%, kitchen 10.5%, work_desk 1.7%, home 1.2%
+logged zone shares: kitchen 70.1%, pc_desk 28.0%, bed 1.2%, home 0.7%, work_desk 0.1%
