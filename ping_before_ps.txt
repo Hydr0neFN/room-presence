@@ -1,0 +1,6 @@
+10.0.0.128
+30 packets transmitted, 30 received, 0% packet loss, time 14531ms
+rtt min/avg/max/mdev = 1.390/8.090/38.684/10.021 ms
+10.0.0.100
+30 packets transmitted, 30 received, 0% packet loss, time 14527ms
+rtt min/avg/max/mdev = 1.170/5.911/33.759/7.228 ms
