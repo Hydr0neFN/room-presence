@@ -28,7 +28,7 @@ import paho.mqtt.client as mqtt
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FILE = os.path.join(HERE, "fingerprints.json")
-ZONES = ("kitchen", "work_desk", "pc_desk", "bed")
+ZONES = ("kitchen", "work_desk", "pc_desk", "bed", "bathroom")
 FLOOR = -100
 WINDOW_S = 10.0         # sliding mean window for csi motion
 POLL_S = 5.0            # HA link feature poll period

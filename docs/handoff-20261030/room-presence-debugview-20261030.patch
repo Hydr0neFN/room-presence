@@ -1,0 +1,25 @@
+--- a/homeassistant/config/dashboards/house.yaml
++++ b/homeassistant/config/dashboards/house.yaml
+@@ -1069,17 +1069,19 @@
+             grid_options:
+               columns: full
+             title: 各節點手機訊號
+-            content: >-
++            content: |-
+               | 節點 | 手機 RSSI (dBm) | 失聯(stale) | CSI 筆數 |
+               |---|---|---|---|
+               {% for n in ['pcdesk', 'cyd', 'workdesk', 'kitchen', 'nlpi'] -%}
+-              | {{ n }} | {{ states('sensor.rp_' ~ n ~ '_signal') }} | {{ '是' if is_state('binary_sensor.rp_' ~ n ~ '_ble_stale', 'on') else '否' }} | {{ states('sensor.rp_' ~ n ~ '_csi_n') }} |
++              {% set sig = states('sensor.rp_' ~ n ~ '_signal') | float(-127) -%}
++              {% set csi = states('sensor.rp_' ~ n ~ '_csi_n') -%}
++              | {{ n }} | {{ sig if sig > -127 else '—' }} | {{ '是' if is_state('binary_sensor.rp_' ~ n ~ '_ble_stale', 'on') else '否' }} | {{ csi if csi not in ['unknown', 'unavailable', 'none', ''] else '—' }} |
+               {% endfor %}
+           - type: markdown
+             grid_options:
+               columns: full
+             title: 證據旗標
+-            content: >-
++            content: |-
+               | 項目 | 狀態 |
+               |---|---|
+               | 廚房雷達（近距離） | {{ states('binary_sensor.rp_kitchen_radar_hint') }}（距離 {{ states('sensor.kitchenradar_detection_distance') }} cm） |

@@ -5,6 +5,7 @@
   presence/<node>/apple   phone / watch IRK-labelled RSSI per node
   presence/<node>/csi     CSI 1 s summaries (motion, still, ok)
   power/powermon/state    powermon watts
+  presence/csi/state      CSI shadow zone (presence-csi service, sensor.rp_csi_zone) -> columns csi_zone, csi_conf (shadow only, nothing reads them back)
     -> DIR/zone-v3-YYYY-MM-DD.csv   every 10 s, columns in HEAD (schema v3; zone-YYYY-MM-DD.csv = v1, zone-v2-* = v2 with a live weak_label)
     -> DIR/transitions.csv          ts, from, to   (every change of `zone`)
 Phone / watch columns: mean dBm of the last 10 s, empty = not heard. csi_<node>_motion / _still: mean over the last 10 s of the
@@ -32,7 +33,9 @@ HEAD = (["ts", "zone", "fp_zone", "home", "pc_online", "pc_locked", "pc_idle", "
          "neopixel_age_s", "gaming", "gaming_pc_w", "radar_moving", "radar_move_cm", "radar_still_cm", "radar_move_en",
          "radar_still_en"]
         + [f"{n}_{k}" for n in NODES for k in ("phone", "watch")]
-        + [f"csi_{n}_{k}" for n in CSI_NODES for k in ("motion", "still")])
+        + [f"csi_{n}_{k}" for n in CSI_NODES for k in ("motion", "still")]
+        + ["csi_zone", "csi_conf"])
+OLD_COLS = 2   # csi_zone, csi_conf were appended to HEAD on 2026-10-30; files written before have HEAD[:-OLD_COLS]
 CTX_KEYS = ["zone", "fp", "home", "pc_online", "pc_locked", "pc_idle", "radar", "radar_cm", "wd_light", "wd_light_ts",
             "lightbar", "lightbar_ts", "link_kitchenradar", "link_neopixel", "link_kitchenrssi", "kitchen_light", "kitchen_light_ts",
             "neopixel", "neopixel_ts", "gaming", "gaming_pc_w", "radar_moving", "radar_move_cm", "radar_still_cm", "radar_move_en",
@@ -52,6 +55,24 @@ def append(path, head, row):
         w.writerow(row)
 
 
+def migrate(path):
+    """Today's file written by the previous schema (HEAD without csi_zone, csi_conf): append two empty columns in place."""
+    if not os.path.exists(path):
+        return False
+    with open(path, newline="", encoding="utf-8") as f:
+        rows = list(csv.reader(f))
+    if not rows or rows[0] != HEAD[:-OLD_COLS]:
+        return False
+    tmp = path + ".mig"
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(HEAD)
+        for r in rows[1:]:
+            w.writerow(r + [""] * OLD_COLS)
+    os.replace(tmp, path)
+    return True
+
+
 def mean_or_blank(vals, nd=1):
     return round(sum(vals) / len(vals), nd) if vals else ""
 
@@ -63,6 +84,7 @@ class State:
         self.sig = defaultdict(deque)       # (node, "phone"|"watch") -> deque[(t, avg)]
         self.csi = defaultdict(deque)       # node -> deque[(t, motion, still)]
         self.power = deque()                # (t, watts)
+        self.csi_state = {}                 # latest presence/csi/state payload
         self.ctx = {}
         self.ctx_t = 0.0
 
@@ -79,6 +101,9 @@ class State:
         if int(p.get("ok", 0)) == 1 and p.get("motion") is not None:
             still = float(p["still"]) if p.get("still") is not None and float(p["still"]) >= 0 else None   # -1 = no baseline yet
             self.csi[node].append((now, float(p["motion"]), still))
+
+    def add_csi_state(self, p):
+        self.csi_state = p
 
     def add_power(self, now, p):
         if p.get("watts") is not None:
@@ -104,6 +129,10 @@ class State:
         power_w = self.power[-1][1] if self.power and self.power[-1][0] >= cutoff else ""
         power_max = max(w for _, w in self.power) if self.power else ""
         fresh = now - self.ctx_t <= CTX_STALE_S
+        try:
+            cs = self.csi_state if now - float(self.csi_state.get("ts", 0)) <= CTX_STALE_S else {}
+        except (TypeError, ValueError):
+            cs = {}
         c = self.ctx if fresh else {}
 
         def age(key):
@@ -120,7 +149,7 @@ class State:
                  c.get("kitchen_light", ""), age("kitchen_light_ts"), c.get("neopixel", ""), age("neopixel_ts"),
                  c.get("gaming", ""), c.get("gaming_pc_w", ""), c.get("radar_moving", ""), c.get("radar_move_cm", ""),
                  c.get("radar_still_cm", ""), c.get("radar_move_en", ""), c.get("radar_still_en", "")]
-                + sig_cols + csi_cols)
+                + sig_cols + csi_cols + [cs.get("zone", ""), cs.get("confidence", "")])
 
 
 state = State()
@@ -138,6 +167,8 @@ def on_message(c, u, m):
                 if prev_zone[0] is not None and p.get("zone") != prev_zone[0]:
                     append(os.path.join(DIR, "transitions.csv"), ["ts", "from", "to"], [iso(now), prev_zone[0], p.get("zone")])
                 prev_zone[0] = p.get("zone")
+            elif m.topic == "presence/csi/state":
+                state.add_csi_state(p)
             elif m.topic == "power/powermon/state":
                 state.add_power(now, p)
             else:
@@ -165,11 +196,13 @@ def writer():
 def main():
     import paho.mqtt.client as mqtt
     os.makedirs(DIR, exist_ok=True)
+    migrate(os.path.join(DIR, "zone-v3-" + time.strftime("%Y-%m-%d") + ".csv"))
     c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id="zone_log") if hasattr(mqtt, "CallbackAPIVersion") \
         else mqtt.Client(client_id="zone_log")
     c.username_pw_set(os.environ["MQTT_USER"], os.environ["MQTT_PASS"])
     c.on_connect = lambda cl, u, f, rc: [cl.subscribe(t) for t in
-                                         ("presence/zone/state", "presence/+/apple", "presence/+/csi", "power/powermon/state")]
+                                         ("presence/zone/state", "presence/+/apple", "presence/+/csi", "power/powermon/state",
+                                          "presence/csi/state")]
     c.on_message = on_message
     c.connect(os.environ.get("MQTT_HOST", "127.0.0.1"), int(os.environ.get("MQTT_PORT", "1883")), 60)
     threading.Thread(target=writer, daemon=True).start()

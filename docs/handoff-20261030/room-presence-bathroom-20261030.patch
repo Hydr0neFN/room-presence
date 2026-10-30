@@ -1,0 +1,238 @@
+--- a/presence-calibrate/calibrate.py
++++ b/presence-calibrate/calibrate.py
+@@ -28,7 +28,7 @@
+ 
+ HERE = os.path.dirname(os.path.abspath(__file__))
+ FILE = os.path.join(HERE, "fingerprints.json")
+-ZONES = ("kitchen", "work_desk", "pc_desk", "bed")
++ZONES = ("kitchen", "work_desk", "pc_desk", "bed", "bathroom")
+ FLOOR = -100
+ WINDOW_S = 10.0         # sliding mean window for csi motion
+ POLL_S = 5.0            # HA link feature poll period
+--- a/label-site/label_site.py
++++ b/label-site/label_site.py
+@@ -24,7 +24,7 @@
+ 
+ import paho.mqtt.client as mqtt
+ 
+-ZONES = [("kitchen", "廚房"), ("work_desk", "工作桌"), ("pc_desk", "電腦桌"), ("bed", "床")]
++ZONES = [("kitchen", "廚房"), ("work_desk", "工作桌"), ("pc_desk", "電腦桌"), ("bed", "床"), ("bathroom", "浴室/門口")]
+ ZONE_IDS = [z for z, _ in ZONES]
+ WINDOW_S = 15
+ KEEP_S = 60
+--- a/homeassistant/config/packages/room_presence.yaml
++++ b/homeassistant/config/packages/room_presence.yaml
+@@ -10,7 +10,7 @@
+ #   presence/<pcdesk|workdesk|kitchen|cyd>/csi  WiFi CSI summary JSON ~2 Hz (motion/still per-mille, ok=0 = no usable window)
+ #   binary_sensor.kitchenradar_presence + sensor.kitchenradar_detection_distance (LD2410, kitchen)
+ #   sensor.chu_fang_kitchenradar_wifi_signal / sensor.neopixel_neopixel_wifi_signal (ESPHome Wi-Fi link RSSI, 1 Hz)
+-# Output: sensor.yui_room_zone = kitchen | work_desk | pc_desk | bed | home (at home, place unknown) | away
++# Output: sensor.yui_room_zone = kitchen | work_desk | pc_desk | bed | bathroom | home (at home, place unknown) | away
+ # and binary_sensor.room_zone_<zone>. Device-free WiFi features (sensor.rp_link_*_motion,
+ # sensor.rp_<node>_csi_still) feed the fingerprint matcher with weight input_number.rp_feat_weight_db. Nothing here acts on the lights unless
+ # input_boolean.room_presence_automations is on (it is OFF by default).
+@@ -37,6 +37,15 @@
+     step: 10
+     unit_of_measurement: cm
+     initial: 250
++  # 0 = off. When > 0, kitchen radar detections at distance >= this value count as zone 'bathroom' (the area past
++  # the kitchen counter: bathroom + door light) instead of 'kitchen'; < this value stays kitchen.
++  rp_bathroom_radar_min_cm:
++    name: Room presence - bathroom radar min distance (0 = off)
++    min: 0
++    max: 600
++    step: 10
++    unit_of_measurement: cm
++    initial: 0
+   rp_hysteresis_db:
+     name: Room presence - BLE switch hysteresis
+     min: 1
+@@ -751,6 +760,11 @@
+       command_topic: "presence/calibrate/cmd"
+       payload_press: '{"action":"start","zone":"bed","seconds":60}'
+       qos: 1
++    - name: "RP calibrate bathroom"
++      unique_id: rp_calibrate_bathroom
++      command_topic: "presence/calibrate/cmd"
++      payload_press: '{"action":"start","zone":"bathroom","seconds":60}'
++      qos: 1
+     - name: "RP calibrate cancel"
+       unique_id: rp_calibrate_cancel
+       command_topic: "presence/calibrate/cmd"
+@@ -776,6 +790,11 @@
+       command_topic: "presence/calibrate/cmd"
+       payload_press: '{"action":"clear","zone":"bed"}'
+       qos: 1
++    - name: "RP calibrate clear bathroom"
++      unique_id: rp_calibrate_clear_bathroom
++      command_topic: "presence/calibrate/cmd"
++      payload_press: '{"action":"clear","zone":"bathroom"}'
++      qos: 1
+ sensor:
+   - platform: statistics
+     name: "RP link pcdesk motion"
+@@ -1009,9 +1028,10 @@
+       #   yui_home off                           -> away
+       #   prev pc_desk, PC unlocked, idle < 300 s, no radar -> pc_desk   (hold: a pause at the PC is not leaving it)
+       #   kitchen radar hint (held 30 s)         -> kitchen
++      #   bathroom radar hint (held 30 s; only when rp_bathroom_radar_min_cm > 0) -> bathroom
+       #   no node hears the phone (< floor)      -> home
+       #   night bed rule                         -> bed
+-      #   fingerprint zone; 'kitchen' only with evidence (radar; power / light only within 2 min of the radar), else home; no fingerprint zone -> home (legacy pcdesk/workdesk comparison only
++      #   fingerprint zone (incl. 'bathroom', which needs no kitchen evidence); 'kitchen' only with evidence (radar; power / light only within 2 min of the radar), else home; no fingerprint zone -> home (legacy pcdesk/workdesk comparison only
+       #   when no fingerprints exist at all)
+       # Minimum dwell: a change driven only by the fingerprint / fallback (not by PC activity, away, radar or the
+       # night rule) waits until the current zone is 45 s old.
+@@ -1024,6 +1044,7 @@
+           {% set idle = states('sensor.rp_pc_idle') | float(9999) %}
+           {% set pc_active = pc_unlocked and idle < 60 %}
+           {% set kitchen = is_state('binary_sensor.rp_kitchen_radar_hint', 'on') %}
++          {% set bath = is_state('binary_sensor.rp_bathroom_radar_hint', 'on') %}
+           {% set kit_ev = is_state('binary_sensor.rp_kitchen_evidence', 'on') %}
+           {% set a = states('sensor.rp_pcdesk_signal') | float(-127) %}
+           {% set b = states('sensor.rp_workdesk_signal') | float(-127) %}
+@@ -1038,8 +1059,9 @@
+           {% set ns = namespace(z='home', soft=false) %}
+           {% if pc_active %}{% set ns.z = 'pc_desk' %}
+           {% elif is_state('binary_sensor.yui_home', 'off') %}{% set ns.z = 'away' %}
+-          {% elif prev == 'pc_desk' and pc_unlocked and idle < 300 and not kitchen %}{% set ns.z = 'pc_desk' %}
++          {% elif prev == 'pc_desk' and pc_unlocked and idle < 300 and not kitchen and not bath %}{% set ns.z = 'pc_desk' %}
+           {% elif kitchen %}{% set ns.z = 'kitchen' %}
++          {% elif bath %}{% set ns.z = 'bathroom' %}
+           {% elif [a, b, c, d, e] | max < floor %}{% set ns.z = 'home' %}
+           {% elif is_state('binary_sensor.rp_night_bed', 'on') %}{% set ns.z = 'bed' %}
+           {% elif fp not in ['none', 'unknown', 'unavailable'] %}
+@@ -1049,7 +1071,7 @@
+           {% elif prev == 'pc_desk' %}{% set ns.soft = true %}{% set ns.z = 'work_desk' if b > a + h else 'pc_desk' %}
+           {% elif prev == 'work_desk' %}{% set ns.soft = true %}{% set ns.z = 'pc_desk' if a > b + h else 'work_desk' %}
+           {% else %}{% set ns.soft = true %}{% set ns.z = 'pc_desk' if a >= b else 'work_desk' %}{% endif %}
+-          {% if ns.soft and prev in ['kitchen', 'work_desk', 'pc_desk', 'bed', 'home'] and ns.z != prev and age < 45 %}{{ prev }}{% else %}{{ ns.z }}{% endif %}
++          {% if ns.soft and prev in ['kitchen', 'work_desk', 'pc_desk', 'bed', 'bathroom', 'home'] and ns.z != prev and age < 45 %}{{ prev }}{% else %}{{ ns.z }}{% endif %}
+         attributes:
+           home: "{{ states('binary_sensor.yui_home') }}"
+           pc_signal_dbm: "{{ states('sensor.rp_pcdesk_signal') }}"
+@@ -1061,6 +1083,7 @@
+           kitchen_radar: "{{ states('binary_sensor.kitchenradar_presence') }}"
+           kitchen_distance_cm: "{{ states('sensor.kitchenradar_detection_distance') }}"
+           kitchen_evidence: "{{ states('binary_sensor.rp_kitchen_evidence') }}"
++          bathroom_radar: "{{ states('binary_sensor.rp_bathroom_radar_hint') }}"
+           night_bed: "{{ states('binary_sensor.rp_night_bed') }}"
+       # Debug (dashboard view 定位校準 -> 除錯): which rule of 'Yui room zone' fired, and the per-zone fingerprint
+       # distance (same maths as 'RP fp zone', dB; lower = closer; hysteresis not applied). Display only.
+@@ -1072,6 +1095,7 @@
+                and is_state('binary_sensor.rp_pc_locked', 'off') %}
+           {% set idle = states('sensor.rp_pc_idle') | float(9999) %}
+           {% set kitchen = is_state('binary_sensor.rp_kitchen_radar_hint', 'on') %}
++          {% set bath = is_state('binary_sensor.rp_bathroom_radar_hint', 'on') %}
+           {% set floor = states('input_number.rp_min_rssi') | float(-90) %}
+           {% set mx = [states('sensor.rp_pcdesk_signal') | float(-127), states('sensor.rp_workdesk_signal') | float(-127),
+                        states('sensor.rp_nlpi_signal') | float(-127), states('sensor.rp_kitchen_signal') | float(-127),
+@@ -1080,8 +1104,9 @@
+           {% set z = states('sensor.yui_room_zone') %}
+           {% if pc_unlocked and idle < 60 %}PC 使用中（閒置 < 60 秒）
+           {% elif is_state('binary_sensor.yui_home', 'off') %}不在家
+-          {% elif z == 'pc_desk' and pc_unlocked and idle < 300 and not kitchen %}PC 已解鎖、閒置 < 300 秒，維持電腦桌
++          {% elif z == 'pc_desk' and pc_unlocked and idle < 300 and not kitchen and not bath %}PC 已解鎖、閒置 < 300 秒，維持電腦桌
+           {% elif kitchen %}廚房雷達（< {{ states('input_number.rp_kitchen_max_cm') | int(250) }} cm）
++          {% elif bath %}浴室雷達（>= {{ states('input_number.rp_bathroom_radar_min_cm') | int(0) }} cm）
+           {% elif mx < floor %}所有節點都聽不到手機（< {{ floor | int }} dBm）
+           {% elif is_state('binary_sensor.rp_night_bed', 'on') %}夜間床規則
+           {% elif fp not in ['none', 'unknown', 'unavailable'] %}指紋：{{ fp }}{% if fp == 'kitchen' and not is_state('binary_sensor.rp_kitchen_evidence', 'on') %}（缺少廚房證據，改為在家）{% endif %}
+@@ -1092,6 +1117,7 @@
+           zone: "{{ states('sensor.yui_room_zone') }}"
+           radar_hint: "{{ states('binary_sensor.rp_kitchen_radar_hint') }}"
+           radar_recent: "{{ states('binary_sensor.rp_kitchen_radar_recent') }}"
++          bathroom_radar_hint: "{{ states('binary_sensor.rp_bathroom_radar_hint') }}"
+           power_max120_w: "{{ states('sensor.rp_power_max120') }}"
+           kitchen_light_age_s: "{{ (now().timestamp() - state_attr('input_datetime.rp_kitchen_light_op', 'timestamp') | float(0)) | int }}"
+           kitchen_evidence: "{{ states('binary_sensor.rp_kitchen_evidence') }}"
+@@ -1176,6 +1202,12 @@
+         state: "{{ is_state('sensor.yui_room_zone', 'bed') }}"
+         delay_on: "00:00:10"
+         delay_off: "00:01:00"
++      - name: "Room zone bathroom"
++        unique_id: room_zone_bathroom
++        device_class: occupancy
++        state: "{{ is_state('sensor.yui_room_zone', 'bathroom') }}"
++        delay_on: "00:00:05"
++        delay_off: "00:00:30"
+       - name: "Room zone away"
+         unique_id: room_zone_away
+         state: "{{ is_state('sensor.yui_room_zone', 'away') }}"
+@@ -1254,7 +1286,20 @@
+         state: >
+           {{ is_state('binary_sensor.kitchenradar_presence', 'on')
+              and states('sensor.kitchenradar_detection_distance') | float(9999)
+-                 < states('input_number.rp_kitchen_max_cm') | float(250) }}
++                 < states('input_number.rp_kitchen_max_cm') | float(250)
++             and (states('input_number.rp_bathroom_radar_min_cm') | float(0) <= 0
++                  or states('sensor.kitchenradar_detection_distance') | float(9999)
++                     < states('input_number.rp_bathroom_radar_min_cm') | float(0)) }}
++      # Bathroom radar hint: only when rp_bathroom_radar_min_cm > 0 (default 0 = off). Radar presence at a distance
++      # >= that value is the area past the kitchen counter (bathroom / door light), not the kitchen. Released 30 s late.
++      - name: "RP bathroom radar hint"
++        unique_id: rp_bathroom_radar_hint
++        delay_off: "00:00:30"
++        state: >
++          {{ states('input_number.rp_bathroom_radar_min_cm') | float(0) > 0
++             and is_state('binary_sensor.kitchenradar_presence', 'on')
++             and states('sensor.kitchenradar_detection_distance') | float(0)
++                 >= states('input_number.rp_bathroom_radar_min_cm') | float(0) }}
+       # Only the radar is owner-located evidence (power / light are house-wide: the owner at the PC desk was
+       # shown 'kitchen' 13:28-13:32 on 2026-10-28 because 1800 W + the light counted). Power and light are a
+       # tiebreak only while the radar saw someone within the last 2 min (hint is held 30 s, +90 s here).
+@@ -1283,6 +1328,7 @@
+           {{ 30 <= m < 450
+              and is_state('binary_sensor.yui_home', 'on')
+              and is_state('binary_sensor.rp_kitchen_radar_hint', 'off')
++             and is_state('binary_sensor.rp_bathroom_radar_hint', 'off')
+              and (states('sensor.rp_pc_idle') | float(9999) > 1800 or is_state('binary_sensor.rp_pc_online', 'off')
+                   or is_state('binary_sensor.rp_pc_locked', 'on'))
+              and sd1 is not none and sd2 is not none and cv1 >= 0.8 and cv2 >= 0.8
+--- a/homeassistant/config/dashboards/house.yaml
++++ b/homeassistant/config/dashboards/house.yaml
+@@ -948,6 +948,16 @@
+               target:
+                 entity_id: button.rp_calibrate_bed
+           - type: button
++            entity: button.rp_calibrate_bathroom
++            name: 校準：浴室/門口
++            icon: mdi:record-rec
++            show_state: false
++            tap_action:
++              action: perform-action
++              perform_action: button.press
++              target:
++                entity_id: button.rp_calibrate_bathroom
++          - type: button
+             entity: button.rp_calibrate_cancel
+             name: 取消錄製
+             icon: mdi:stop
+@@ -964,7 +974,7 @@
+           - type: markdown
+             content: >-
+               {% set z = state_attr('sensor.rp_calibrate_status', 'zones') or {} %}
+-              {% for k in ['kitchen','work_desk','pc_desk','bed'] %}
++              {% for k in ['kitchen','work_desk','pc_desk','bed','bathroom'] %}
+               - `{{ k }}`：{{ z.get(k, '尚未校準') }}
+               {% endfor %}
+           - type: button
+@@ -1015,6 +1025,18 @@
+                 entity_id: button.rp_calibrate_clear_bed
+               confirmation:
+                 text: 清除「床」的指紋？
++          - type: button
++            entity: button.rp_calibrate_clear_bathroom
++            name: 清除：浴室/門口
++            icon: mdi:delete-outline
++            show_state: false
++            tap_action:
++              action: perform-action
++              perform_action: button.press
++              target:
++                entity_id: button.rp_calibrate_clear_bathroom
++              confirmation:
++                text: 清除「浴室/門口」的指紋？
+ 
+   # ================================================================== #
+   # 5. Room presence debug (定位除錯): why the zone is what it is (read-only)

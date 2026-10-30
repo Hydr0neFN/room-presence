@@ -24,7 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import paho.mqtt.client as mqtt
 
-ZONES = [("kitchen", "廚房"), ("work_desk", "工作桌"), ("pc_desk", "電腦桌"), ("bed", "床")]
+ZONES = [("kitchen", "廚房"), ("work_desk", "工作桌"), ("pc_desk", "電腦桌"), ("bed", "床"), ("bathroom", "浴室/門口")]
 ZONE_IDS = [z for z, _ in ZONES]
 WINDOW_S = 15
 KEEP_S = 60

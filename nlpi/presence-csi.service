@@ -1,0 +1,17 @@
+[Unit]
+Description=CSI shadow zoning (MQTT presence/+/csi -> sensor.rp_csi_zone, shadow only)
+After=mosquitto.service network-online.target
+
+[Service]
+EnvironmentFile=/etc/presence-ble.env
+Environment=CSI_DIR=/var/lib/presence-csi
+Environment=ZONELOG_DIR=/var/lib/zone-log
+Environment=LABEL_DB=/var/lib/presence-labels/labels.db
+WorkingDirectory=/opt/presence-csi
+ExecStart=/usr/bin/python3 /opt/presence-csi/csi_svc.py
+Restart=always
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

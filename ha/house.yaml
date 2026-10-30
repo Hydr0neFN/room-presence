@@ -1,0 +1,1148 @@
+# Whole-house dashboard for a one-room studio (YAML mode).
+#
+# Registered in configuration.yaml under lovelace: dashboards: house-yaml
+# Edit this file, then reload from the dashboard's 3-dot menu > Refresh.
+# Redesigned 2026-09-26.
+#
+# Design rules this file follows:
+#   - Studio = one room. Main view is grouped by INTENT: control first, then the
+#     things that can need action (basil), then awareness (air, energy).
+#   - Built-in cards only (no HACS on this instance).
+#   - Alerts are conditional cards (visibility:), so a healthy house shows no
+#     warning chrome at all.
+#   - kitchenlight is an ESP-01S relay (light: platform: binary) -> on/off ONLY.
+#   - monitor light bar reports supported_color_modes: ["color_temp"] ->
+#     brightness + colour temp are both valid. It never reports state; HA's
+#     value is optimistic.
+#   - neopixel is an RGB strip; HA has no tile feature for a colour wheel or
+#     effects, so tap the tile for the full more-info dialog.
+#   - power_monitor_energy is total_increasing -> statistics-graph must use
+#     stat_types: [change], not [state], or the bars show the meter reading.
+#   - gaming_pc_* power/energy are ESTIMATES (CPU+GPU package + flat base / PSU
+#     curve), roughly +-10%. house_minus_pc inherits that error, so it only
+#     appears inside a graph, never as a tile.
+#   - The 6 light-bar knob automations are event listeners for the physical
+#     knob. Toggling one in the UI DISABLES the knob. They are deliberately absent.
+#   - The basil pump is controlled by the device's own closed loop. The only pump
+#     action here is "water now", behind a confirmation.
+#   - The basil box light is the plant's ONLY light source (enclosed box);
+#     always labeled as 植物燈.
+
+title: 全屋
+views:
+  # ================================================================== #
+  # 1. Main View (家): Daily glance & control (~2 phone screens)
+  # ================================================================== #
+  - title: 家
+    path: home
+    icon: mdi:home-heart
+    type: sections
+    max_columns: 4
+    badges:
+      - type: entity
+        entity: sensor.yui_room_zone
+        name: 區域
+        icon: mdi:map-marker
+      - type: entity
+        entity: sensor.rp_csi_label
+        name: CSI（影子）
+        icon: mdi:wifi-marker
+      - type: entity
+        entity: sensor.room_environment_temperature
+        name: 室溫
+      - type: entity
+        entity: sensor.room_environment_humidity
+        name: 濕度
+      - type: entity
+        entity: sensor.room_environment_co2
+        name: CO2
+      - type: entity
+        entity: sensor.power_monitor_power
+        name: 用電
+      - type: entity
+        entity: sensor.house_energy_today
+        name: 今日
+      # Alerts (active only)
+      - type: entity
+        entity: binary_sensor.basil_drain_fault
+        name: 羅勒排水異常
+        color: red
+        visibility:
+          - condition: state
+            entity: binary_sensor.basil_drain_fault
+            state: "on"
+      - type: entity
+        entity: binary_sensor.basil_tank_empty
+        name: 羅勒水箱缺水
+        color: red
+        visibility:
+          - condition: state
+            entity: binary_sensor.basil_tank_empty
+            state: "on"
+      - type: entity
+        entity: sensor.hanze_cal_status
+        name: 課表同步異常
+        color: amber
+        visibility:
+          - condition: state
+            entity: sensor.hanze_cal_status
+            state_not: ok
+
+    sections:
+      # ---------------- lights & scenes ---------------- #
+      - type: grid
+        cards:
+          - type: heading
+            heading: 燈光與氛圍
+            heading_style: title
+            icon: mdi:lightbulb-group
+            badges:
+              - type: entity
+                entity: automation.kitchen_light_on_when_the_radar_sees_presence
+                name: 雷達自動開燈
+                icon: mdi:motion-sensor
+                color: teal
+                tap_action:
+                  action: toggle
+
+          - type: tile
+            entity: light.monitor_light_bar_light_bar
+            name: 螢幕掛燈
+            icon: mdi:desk-lamp
+            color: amber
+            grid_options:
+              columns: full
+            features:
+              - type: light-brightness
+              - type: light-color-temp
+
+          - type: tile
+            entity: light.kitchenlight_kitchen_light
+            name: 廚房燈
+            icon: mdi:ceiling-light
+            color: amber
+            grid_options:
+              columns: 6
+            tap_action:
+              action: toggle
+
+          - type: tile
+            entity: light.neopixel_neopixel
+            name: NeoPixel 燈條
+            icon: mdi:led-strip-variant
+            color: amber
+            grid_options:
+              columns: 6
+            tap_action:
+              action: more-info
+            features:
+              - type: light-brightness
+
+          - type: button
+            name: 全部關燈
+            icon: mdi:lightbulb-off-outline
+            show_state: false
+            grid_options:
+              columns: full
+              rows: 1
+            tap_action:
+              action: perform-action
+              perform_action: light.turn_off
+              target:
+                entity_id:
+                  - light.kitchenlight_kitchen_light
+                  - light.neopixel_neopixel
+                  - light.monitor_light_bar_light_bar
+
+          - type: heading
+            heading: 起床投影
+            heading_style: subtitle
+            icon: mdi:projector
+
+          - type: tile
+            entity: input_boolean.wake_display
+            name: 投影場景
+            icon: mdi:weather-sunset-up
+            color: deep-purple
+            grid_options:
+              columns: 6
+            tap_action:
+              action: toggle
+
+          - type: tile
+            entity: media_player.lg_webos_tv_hu710pb_gl
+            name: 投影機
+            icon: mdi:projector
+            color: indigo
+            grid_options:
+              columns: 6
+
+      # ---------------- basil plant ---------------- #
+      - type: grid
+        cards:
+          - type: heading
+            heading: 羅勒植栽
+            heading_style: title
+            icon: mdi:sprout
+            badges:
+              - type: entity
+                entity: switch.basil_grow_light
+                name: 植物燈
+                icon: mdi:coach-lamp
+                color: amber
+                show_state: true
+                show_icon: true
+                tap_action:
+                  action: toggle
+
+          # Conditional alerts
+          - type: tile
+            entity: binary_sensor.basil_drain_fault
+            name: 排水異常（裝置已自鎖）
+            icon: mdi:alert-octagon
+            color: red
+            grid_options:
+              columns: full
+            visibility:
+              - condition: state
+                entity: binary_sensor.basil_drain_fault
+                state: "on"
+
+          - type: button
+            entity: button.basil_clear_drain_fault
+            name: 排除托盤積水後解除鎖定
+            icon: mdi:alert-remove
+            show_state: false
+            grid_options:
+              columns: full
+              rows: 1
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.basil_clear_drain_fault
+              confirmation:
+                text: 確認托盤的水已經排掉了？
+            visibility:
+              - condition: state
+                entity: binary_sensor.basil_drain_fault
+                state: "on"
+
+          - type: tile
+            entity: binary_sensor.basil_tank_empty
+            name: 水箱缺水，請補水
+            icon: mdi:water-off
+            color: red
+            grid_options:
+              columns: full
+            visibility:
+              - condition: state
+                entity: binary_sensor.basil_tank_empty
+                state: "on"
+
+          - type: tile
+            entity: sensor.basil_uptime
+            name: 羅勒感測節點離線
+            icon: mdi:lan-disconnect
+            color: amber
+            grid_options:
+              columns: full
+            visibility:
+              - condition: state
+                entity: sensor.basil_uptime
+                state: unavailable
+
+          # Live metrics
+          - type: tile
+            entity: sensor.basil_soil_moisture
+            name: 土壤濕度
+            icon: mdi:water-percent
+            color: green
+            grid_options:
+              columns: 6
+
+          - type: tile
+            entity: sensor.basil_tank
+            name: 水箱水位
+            icon: mdi:cup-water
+            color: blue
+            grid_options:
+              columns: 6
+
+          - type: tile
+            entity: binary_sensor.basil_needs_water
+            name: 需補水狀態
+            icon: mdi:watering-can-outline
+            color: light-green
+            grid_options:
+              columns: 6
+
+          - type: tile
+            entity: sensor.basil_box_temperature
+            name: 箱內溫度
+            icon: mdi:thermometer
+            color: orange
+            grid_options:
+              columns: 6
+
+          - type: history-graph
+            title: 土壤與水箱趨勢 (48h)
+            hours_to_show: 48
+            entities:
+              - entity: sensor.basil_soil_moisture
+                name: 土壤濕度
+              - entity: sensor.basil_tank
+                name: 水箱水位
+
+          - type: button
+            entity: button.basil_water_now
+            name: 立即澆水一次
+            icon: mdi:watering-can
+            show_state: false
+            grid_options:
+              columns: full
+              rows: 1
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.basil_water_now
+              confirmation:
+                text: 繞過自動判斷，立即澆一次水？
+
+      # ---------------- air & climate ---------------- #
+      - type: grid
+        cards:
+          - type: heading
+            heading: 室內環境
+            heading_style: title
+            icon: mdi:air-filter
+            badges:
+              - type: entity
+                entity: sensor.room_environment_pressure
+                name: 氣壓
+                icon: mdi:gauge
+
+          - type: gauge
+            entity: sensor.room_environment_co2
+            name: CO2 濃度
+            min: 400
+            max: 2000
+            needle: true
+            severity:
+              green: 400
+              yellow: 800
+              red: 1200
+            grid_options:
+              columns: full
+
+          - type: history-graph
+            title: 室內溫濕度趨勢 (24h)
+            hours_to_show: 24
+            entities:
+              - entity: sensor.room_environment_temperature
+                name: 溫度
+              - entity: sensor.room_environment_humidity
+                name: 濕度
+
+          - type: weather-forecast
+            entity: weather.forecast_jia
+            forecast_type: daily
+            show_current: true
+            grid_options:
+              columns: full
+
+      # ---------------- power glance ---------------- #
+      - type: grid
+        cards:
+          - type: heading
+            heading: 即時用電
+            heading_style: title
+            icon: mdi:flash
+
+          - type: tile
+            entity: sensor.power_monitor_power
+            name: 全屋即時功率
+            icon: mdi:home-lightning-bolt
+            color: amber
+            grid_options:
+              columns: 6
+
+          - type: tile
+            entity: sensor.gaming_pc_power
+            name: 電腦功率 (估)
+            icon: mdi:desktop-tower
+            color: purple
+            grid_options:
+              columns: 6
+
+          - type: tile
+            entity: sensor.house_energy_today
+            name: 全屋今日用電
+            icon: mdi:counter
+            color: amber
+            grid_options:
+              columns: 6
+
+          - type: tile
+            entity: sensor.gaming_pc_energy_today
+            name: 電腦今日 (估)
+            icon: mdi:counter
+            color: purple
+            grid_options:
+              columns: 6
+
+          - type: history-graph
+            title: 功率即時拆解 (12h)
+            hours_to_show: 12
+            entities:
+              - entity: sensor.gaming_pc_power
+                name: 電腦 (估算)
+              - entity: sensor.house_minus_pc
+                name: 其他家電
+
+  # ================================================================== #
+  # 2. Network View (網路): WAN Shaper & Traffic Diagnostics
+  # ================================================================== #
+  - title: 網路
+    path: network
+    icon: mdi:lan
+    type: sections
+    max_columns: 2
+    badges:
+      - type: entity
+        entity: binary_sensor.nl_wan_shaper_bufferbloat
+        name: Bufferbloat
+        color: red
+      - type: entity
+        entity: sensor.nl_wan_shaper_shaper_rate
+        name: 當前限速
+      - type: entity
+        entity: sensor.nl_wan_shaper_wan_autorate_state
+        name: Autorate 狀態
+      - type: entity
+        entity: sensor.nl_wan_shaper_wan_icmp_loss
+        name: 丟包率
+        color: red
+        visibility:
+          - condition: numeric_state
+            entity: sensor.nl_wan_shaper_wan_icmp_loss
+            above: 0
+
+    sections:
+      # ---------------- WAN Throughput ---------------- #
+      - type: grid
+        cards:
+          - type: heading
+            heading: WAN 吞吐與頻寬
+            heading_style: title
+            icon: mdi:web
+
+          - type: tile
+            entity: sensor.nl_wan_shaper_wan_download
+            name: 即時下載
+            icon: mdi:download-network
+            color: blue
+            grid_options:
+              columns: 6
+
+          - type: tile
+            entity: sensor.nl_wan_shaper_wan_upload
+            name: 即時上傳
+            icon: mdi:upload-network
+            color: green
+            grid_options:
+              columns: 6
+
+          - type: history-graph
+            title: WAN 總吞吐 (12h)
+            hours_to_show: 12
+            entities:
+              - entity: sensor.nl_wan_shaper_wan_download
+                name: 下載
+              - entity: sensor.nl_wan_shaper_wan_upload
+                name: 上傳
+
+          - type: history-graph
+            title: 各裝置下載分佈 (12h)
+            hours_to_show: 12
+            entities:
+              - entity: sensor.nl_wan_shaper_pc_download
+                name: PC
+              - entity: sensor.nl_wan_shaper_iphone_download
+                name: iPhone
+              - entity: sensor.nl_wan_shaper_ipad_download
+                name: iPad
+              - entity: sensor.nl_wan_shaper_mac_wifi_download
+                name: Mac
+              - entity: sensor.nl_wan_shaper_dock_download
+                name: Dock
+
+      # ---------------- Queue Health (CAKE) ---------------- #
+      - type: grid
+        cards:
+          - type: heading
+            heading: 佇列健康度 (CAKE)
+            heading_style: title
+            icon: mdi:heart-pulse
+            badges:
+              - type: entity
+                entity: switch.nl_wan_shaper_wan_autorate_freeze
+                name: 凍結 Autorate
+                icon: mdi:snowflake
+                color: light-blue
+                tap_action:
+                  action: toggle
+
+          - type: tile
+            entity: sensor.nl_wan_shaper_cake_queue_delay
+            name: 佇列延遲
+            icon: mdi:timer-sand
+            color: amber
+            grid_options:
+              columns: 6
+
+          - type: tile
+            entity: sensor.nl_wan_shaper_wan_icmp_p95
+            name: ICMP p95
+            icon: mdi:chart-bell-curve
+            color: purple
+            grid_options:
+              columns: 6
+
+          - type: history-graph
+            title: 延遲分佈 (12h)
+            hours_to_show: 12
+            entities:
+              - entity: sensor.nl_wan_shaper_cake_queue_delay
+                name: 佇列延遲
+              - entity: sensor.nl_wan_shaper_cake_peak_delay
+                name: 峰值延遲
+              - entity: sensor.nl_wan_shaper_cake_delay_1m_avg
+                name: 1m 平均延遲
+
+          - type: entities
+            title: Autorate 與佇列狀態
+            entities:
+              - entity: sensor.nl_wan_shaper_wan_autorate_shaper
+                name: Autorate 目標限速
+                icon: mdi:speedometer
+              - entity: sensor.nl_wan_shaper_wan_autorate_load
+                name: Autorate 負載比率
+                icon: mdi:gauge
+              - entity: sensor.nl_wan_shaper_wan_icmp_loss
+                name: ICMP 丟包率
+                icon: mdi:cloud-alert
+              - entity: sensor.nl_wan_shaper_cake_backlog
+                name: 佇列積壓 (Backlog)
+                icon: mdi:tray-full
+              - entity: sensor.nl_wan_shaper_cake_drops
+                name: 佇列丟包率 (Drops)
+                icon: mdi:package-down
+
+          - type: entities
+            title: 各裝置上傳流量
+            entities:
+              - entity: sensor.nl_wan_shaper_pc_upload
+                name: PC 上傳
+                icon: mdi:desktop-tower
+              - entity: sensor.nl_wan_shaper_iphone_upload
+                name: iPhone 上傳
+                icon: mdi:cellphone
+              - entity: sensor.nl_wan_shaper_ipad_upload
+                name: iPad 上傳
+                icon: mdi:tablet
+
+  # ================================================================== #
+  # 3. System View (系統): Diagnostics, Telemetry, Config, Maintenance
+  # ================================================================== #
+  - title: 系統
+    path: system
+    icon: mdi:cog
+    type: sections
+    max_columns: 4
+
+    sections:
+      # ---------------- Energy Diagnostics ---------------- #
+      - type: grid
+        cards:
+          - type: heading
+            heading: 能源分析與統計
+            heading_style: title
+            icon: mdi:chart-bar
+
+          - type: statistics-graph
+            title: 每小時耗電趨勢 (kWh)
+            chart_type: bar
+            period: hour
+            days_to_show: 1
+            stat_types:
+              - change
+            entities:
+              - entity: sensor.power_monitor_energy
+                name: 全屋耗電
+
+          - type: statistics-graph
+            title: 每日耗電趨勢 (14天, kWh)
+            chart_type: bar
+            period: day
+            days_to_show: 14
+            stat_types:
+              - change
+            entities:
+              - entity: sensor.power_monitor_energy
+                name: 全屋耗電
+
+          - type: entities
+            title: 24h 待機基線與累計電費
+            entities:
+              - entity: sensor.house_base_floor_24h
+                name: 待機底噪 (P10)
+                icon: mdi:power-sleep
+              - entity: sensor.house_base_mean_24h
+                name: 常態均值 (含冰箱)
+                icon: mdi:chart-timeline-variant
+              - entity: sensor.power_monitor_energy_cost
+                name: 累計電費
+                icon: mdi:currency-eur
+              - entity: sensor.gaming_pc_energy
+                name: 電腦累計耗電 (估算)
+                icon: mdi:counter
+
+          - type: history-graph
+            title: 環境 CO2 歷史趨勢 (24h)
+            hours_to_show: 24
+            entities:
+              - entity: sensor.room_environment_co2
+                name: CO2 濃度
+
+      # ---------------- Device Health & WiFi ---------------- #
+      - type: grid
+        cards:
+          - type: heading
+            heading: 裝置健康
+            heading_style: title
+            icon: mdi:wifi-check
+
+          - type: entities
+            title: 連線與訊號品質
+            entities:
+              - entity: binary_sensor.nl_desk_panel_status
+                name: 桌面面板連線
+                icon: mdi:tablet-dashboard
+              - entity: sensor.nl_desk_panel_wifi_signal
+                name: 桌面面板 WiFi
+                icon: mdi:wifi
+              - entity: sensor.basil_wifi_signal
+                name: 羅勒節點 WiFi
+                icon: mdi:wifi
+              - entity: sensor.room_environment_wifi_signal
+                name: 環境感測 WiFi
+                icon: mdi:wifi
+              - entity: sensor.power_monitor_wifi_signal
+                name: 電表 WiFi
+                icon: mdi:wifi
+              - entity: sensor.power_monitor_sensor_signal
+                name: 電表光感訊號強度
+                icon: mdi:signal-variant
+              - entity: sensor.neopixel_neopixel_wifi_signal
+                name: NeoPixel WiFi
+                icon: mdi:wifi
+
+          - type: entities
+            title: 運行時間與重啟原因
+            entities:
+              - entity: sensor.basil_uptime
+                name: 羅勒運行時間
+                icon: mdi:clock-outline
+              - entity: sensor.basil_reset_reason
+                name: 羅勒重啟原因
+                icon: mdi:restart-alert
+              - entity: sensor.room_environment_uptime
+                name: 環境感測運行時間
+                icon: mdi:clock-outline
+              - entity: sensor.room_environment_reset_reason
+                name: 環境感測重啟原因
+                icon: mdi:restart-alert
+              - entity: sensor.neopixel_neopixel_uptime
+                name: NeoPixel 運行時間
+                icon: mdi:clock-outline
+              - entity: sensor.neopixel_neopixel_esphome_version
+                name: NeoPixel ESPHome 韌體
+                icon: mdi:chip
+
+          - type: entities
+            title: 羅勒記憶體 (ESP8266)
+            entities:
+              - entity: sensor.basil_heap_free
+                name: 可用 Heap
+                icon: mdi:memory
+              - entity: sensor.basil_heap_max_block
+                name: 最大連續區塊
+                icon: mdi:cube-outline
+              - entity: sensor.basil_heap_fragmentation
+                name: 記憶體碎片率
+                icon: mdi:puzzle-outline
+
+          - type: entities
+            title: 系統服務與設備
+            entities:
+              - entity: sensor.hanze_cal_status
+                name: Hanze 課表同步狀態
+                icon: mdi:calendar-sync
+              - entity: sensor.backup_backup_manager_state
+                name: 自動備份狀態
+                icon: mdi:cloud-check
+              - entity: sensor.backup_last_successful_automatic_backup
+                name: 上次成功備份
+                icon: mdi:backup-restore
+              - entity: sensor.backup_next_scheduled_automatic_backup
+                name: 下次排程備份
+                icon: mdi:clock-start
+              - entity: sensor.ephone_battery_level
+                name: iPhone 電量
+                icon: mdi:battery-charging-60
+
+      # ---------------- PC & Radar Tuning ---------------- #
+      - type: grid
+        cards:
+          - type: heading
+            heading: 電腦遙測
+            heading_style: title
+            icon: mdi:desktop-tower
+            badges:
+              - type: entity
+                entity: binary_sensor.gaming_pc_gaming
+                name: 遊戲狀態
+                icon: mdi:gamepad-variant
+                color: green
+
+          - type: entities
+            title: 電腦硬體感測 (功耗為估算值)
+            entities:
+              - entity: sensor.gaming_pc_power
+                name: 總功耗 (估算)
+                icon: mdi:flash
+              - entity: sensor.gaming_pc_cpu_power
+                name: CPU 功耗
+                icon: mdi:cpu-64-bit
+              - entity: sensor.gaming_pc_gpu_power
+                name: GPU 功耗
+                icon: mdi:expansion-card
+              - entity: sensor.gaming_pc_cpu_temp
+                name: CPU 溫度
+                icon: mdi:thermometer
+              - entity: sensor.gaming_pc_gpu_temp
+                name: GPU 溫度
+                icon: mdi:thermometer
+              - entity: sensor.gaming_pc_gpu_load
+                name: GPU 負載
+                icon: mdi:speedometer
+
+          - type: history-graph
+            title: CPU / GPU 溫度 (12h)
+            hours_to_show: 12
+            entities:
+              - entity: sensor.gaming_pc_cpu_temp
+                name: CPU 溫度
+              - entity: sensor.gaming_pc_gpu_temp
+                name: GPU 溫度
+
+          - type: heading
+            heading: 廚房雷達 (調校用)
+            heading_style: subtitle
+            icon: mdi:radar
+
+          - type: entities
+            title: mmWave 雷達感測參數
+            entities:
+              - entity: binary_sensor.kitchenradar_presence
+                name: 人員存在狀態
+                icon: mdi:motion-sensor
+              - entity: binary_sensor.kitchenradar_moving_target
+                name: 移動目標狀態
+                icon: mdi:walk
+              - entity: sensor.kitchenradar_detection_distance
+                name: 偵測距離
+                icon: mdi:arrow-expand-horizontal
+              - entity: sensor.kitchenradar_moving_distance
+                name: 移動目標距離
+                icon: mdi:map-marker-distance
+              - entity: sensor.kitchenradar_still_distance
+                name: 靜止目標距離
+                icon: mdi:map-marker-radius
+              - entity: sensor.kitchenradar_moving_energy
+                name: 移動能量
+                icon: mdi:lightning-bolt
+              - entity: sensor.kitchenradar_still_energy
+                name: 靜止能量
+                icon: mdi:leaf
+
+          - type: history-graph
+            title: 人員佔用 vs 廚房燈聯動 (24h)
+            hours_to_show: 24
+            entities:
+              - entity: binary_sensor.kitchenradar_presence
+                name: 雷達人員佔用
+              - entity: light.kitchenlight_kitchen_light
+                name: 廚房燈狀態
+
+      # ---------------- Basil Settings & Maintenance ---------------- #
+      - type: grid
+        cards:
+          - type: heading
+            heading: 羅勒閉環設定
+            heading_style: title
+            icon: mdi:sprout
+
+          - type: entities
+            title: 灌溉閉環控制門檻
+            entities:
+              - entity: number.basil_water_below
+                name: 低於此濕度澆水
+                icon: mdi:water-percent
+              - entity: number.basil_stop_at
+                name: 澆至此濕度停止
+                icon: mdi:water-check
+              - entity: number.basil_dose
+                name: 單次給水量
+                icon: mdi:cup-water
+              - entity: number.basil_max_cycles
+                name: 最多循環次數
+                icon: mdi:repeat
+              - entity: number.basil_lockout
+                name: 澆水鎖定時間
+                icon: mdi:timer-lock
+              - entity: automation.basil_grow_light_schedule
+                name: 植物燈排程 (07:30–00:30)
+                icon: mdi:calendar-clock
+
+          - type: entities
+            title: 感測器校正與原始數據
+            entities:
+              - entity: button.basil_calibrate_start_fill
+                name: 開始注水校正
+                icon: mdi:play-circle-outline
+              - entity: button.basil_calibrate_save_dose
+                name: 儲存水量校正
+                icon: mdi:content-save-outline
+              - entity: sensor.basil_tank_depth
+                name: 水箱水深
+                icon: mdi:ruler
+              - entity: sensor.basil_tank_distance
+                name: 超音波頂部距離
+                icon: mdi:arrow-collapse-up
+              - entity: sensor.basil_soil_voltage
+                name: 土壤電壓原始值
+                icon: mdi:sine-wave
+
+          - type: heading
+            heading: 系統維護動作
+            heading_style: subtitle
+            icon: mdi:wrench
+
+          - type: button
+            entity: button.neopixel_neopixel_restart
+            name: 重啟 NeoPixel 燈條控制器
+            icon: mdi:restart
+            show_state: false
+            grid_options:
+              columns: full
+              rows: 1
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.neopixel_neopixel_restart
+              confirmation:
+                text: 重啟 NeoPixel 燈條？
+
+          - type: button
+            entity: button.monitor_light_bar_pair
+            name: 螢幕掛燈配對
+            icon: mdi:link-variant
+            show_state: false
+            grid_options:
+              columns: full
+              rows: 1
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.monitor_light_bar_pair
+              confirmation:
+                text: 進入配對模式會解除掛燈與旋鈕的配對，確定？
+
+          - type: markdown
+            content: >-
+              旋鈕的 6 條自動化（brighter / dimmer / warmer / cooler / toggle /
+              hold-to-off）是實體旋鈕的事件監聽器，**不放在儀表板上**：在 UI 按下去
+              等於 `automation.turn_off`，會讓實體旋鈕失效。要停用請走
+              設定 → 自動化。
+
+  # ================================================================== #
+  # 4. Room presence calibration (定位校準): buttons -> presence/calibrate/cmd
+  #    Service: nl-pi presence-calibrate.service (room-presence/nlpi/calibrate_svc.py)
+  # ================================================================== #
+  - title: 定位校準
+    path: calibrate
+    icon: mdi:crosshairs-gps
+    type: sections
+    max_columns: 2
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: 站在區域內，手機放平常的口袋，按下後保持 60 秒
+          - type: tile
+            entity: sensor.yui_room_zone
+            name: 目前判斷的區域
+            grid_options:
+              columns: full
+          - type: markdown
+            grid_options:
+              columns: full
+            content: >-
+              {% set s = states('sensor.rp_calibrate_status') %}
+              {% set a = state_attr('sensor.rp_calibrate_status', 'zone') %}
+              **狀態**：{{ {'idle':'待命','recording':'錄製中','done':'完成','error':'錯誤','offline':'服務離線'}.get(s, s) }}
+              {% if s == 'recording' %}（{{ a }}，{{ state_attr('sensor.rp_calibrate_status','elapsed') }} /
+              {{ state_attr('sensor.rp_calibrate_status','seconds') }} 秒，{{ states('sensor.rp_calibrate_progress') }}%）{% endif %}
+
+              {{ state_attr('sensor.rp_calibrate_status', 'message') }}
+          - type: tile
+            entity: sensor.rp_calibrate_progress
+            name: 進度
+            grid_options:
+              columns: full
+          - type: button
+            entity: button.rp_calibrate_kitchen
+            name: 校準：廚房
+            icon: mdi:record-rec
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.rp_calibrate_kitchen
+          - type: button
+            entity: button.rp_calibrate_work_desk
+            name: 校準：工作桌
+            icon: mdi:record-rec
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.rp_calibrate_work_desk
+          - type: button
+            entity: button.rp_calibrate_pc_desk
+            name: 校準：電腦桌
+            icon: mdi:record-rec
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.rp_calibrate_pc_desk
+          - type: button
+            entity: button.rp_calibrate_bed
+            name: 校準：床
+            icon: mdi:record-rec
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.rp_calibrate_bed
+          - type: button
+            entity: button.rp_calibrate_bathroom
+            name: 校準：浴室/門口
+            icon: mdi:record-rec
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.rp_calibrate_bathroom
+          - type: button
+            entity: button.rp_calibrate_cancel
+            name: 取消錄製
+            icon: mdi:stop
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.rp_calibrate_cancel
+      - type: grid
+        cards:
+          - type: heading
+            heading: 已儲存的指紋
+          - type: markdown
+            content: >-
+              {% set z = state_attr('sensor.rp_calibrate_status', 'zones') or {} %}
+              {% for k in ['kitchen','work_desk','pc_desk','bed','bathroom'] %}
+              - `{{ k }}`：{{ z.get(k, '尚未校準') }}
+              {% endfor %}
+          - type: button
+            entity: button.rp_calibrate_clear_kitchen
+            name: 清除：廚房
+            icon: mdi:delete-outline
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.rp_calibrate_clear_kitchen
+              confirmation:
+                text: 清除「廚房」的指紋？
+          - type: button
+            entity: button.rp_calibrate_clear_work_desk
+            name: 清除：工作桌
+            icon: mdi:delete-outline
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.rp_calibrate_clear_work_desk
+              confirmation:
+                text: 清除「工作桌」的指紋？
+          - type: button
+            entity: button.rp_calibrate_clear_pc_desk
+            name: 清除：電腦桌
+            icon: mdi:delete-outline
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.rp_calibrate_clear_pc_desk
+              confirmation:
+                text: 清除「電腦桌」的指紋？
+          - type: button
+            entity: button.rp_calibrate_clear_bed
+            name: 清除：床
+            icon: mdi:delete-outline
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.rp_calibrate_clear_bed
+              confirmation:
+                text: 清除「床」的指紋？
+          - type: button
+            entity: button.rp_calibrate_clear_bathroom
+            name: 清除：浴室/門口
+            icon: mdi:delete-outline
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.rp_calibrate_clear_bathroom
+              confirmation:
+                text: 清除「浴室/門口」的指紋？
+
+  # ================================================================== #
+  # 5. Room presence debug (定位除錯): why the zone is what it is (read-only)
+  # ================================================================== #
+  - title: 定位除錯
+    path: presence-debug
+    icon: mdi:bug-outline
+    type: sections
+    max_columns: 2
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: 為什麼是這個區域
+          - type: markdown
+            grid_options:
+              columns: full
+            content: >-
+              ## 區域：{{ states('sensor.yui_room_zone') }}
+
+              **判斷依據**：{{ states('sensor.rp_zone_reason') }}
+
+              **指紋最近區域**：{{ states('sensor.rp_fp_zone') }}
+              （CSI 特徵權重 {{ state_attr('sensor.rp_fp_debug', 'feature_weight_db') }} dB）
+
+              **各區距離（dB，越小越近）**：{{ state_attr('sensor.rp_fp_debug', 'dist') or '（尚無指紋或節點不足）' }}
+
+              參與比對的節點：{{ state_attr('sensor.rp_fp_debug', 'used_nodes') or '無' }}
+          - type: markdown
+            grid_options:
+              columns: full
+            title: 各節點手機訊號
+            content: |-
+              | 節點 | 手機 RSSI (dBm) | 失聯(stale) | CSI 筆數 |
+              |---|---|---|---|
+              {% for n in ['pcdesk', 'cyd', 'workdesk', 'kitchen', 'nlpi'] -%}
+              {% set sig = states('sensor.rp_' ~ n ~ '_signal') | float(-127) -%}
+              {% set csi = states('sensor.rp_' ~ n ~ '_csi_n') -%}
+              | {{ n }} | {{ sig if sig > -127 else '—' }} | {{ '是' if is_state('binary_sensor.rp_' ~ n ~ '_ble_stale', 'on') else '否' }} | {{ csi if csi not in ['unknown', 'unavailable', 'none', ''] else '—' }} |
+              {% endfor %}
+          - type: markdown
+            grid_options:
+              columns: full
+            title: 證據旗標
+            content: |-
+              | 項目 | 狀態 |
+              |---|---|
+              | 廚房雷達（近距離） | {{ states('binary_sensor.rp_kitchen_radar_hint') }}（距離 {{ states('sensor.kitchenradar_detection_distance') }} cm） |
+              | 雷達 2 分鐘內有人 | {{ states('binary_sensor.rp_kitchen_radar_recent') }} |
+              | 電力（120 秒最大值） | {{ states('sensor.rp_power_max120') }} W |
+              | 廚房燈上次操作 | {{ state_attr('sensor.rp_zone_reason', 'kitchen_light_age_s') }} 秒前 |
+              | 廚房證據（綜合） | {{ states('binary_sensor.rp_kitchen_evidence') }} |
+              | 夜間床規則 | {{ states('binary_sensor.rp_night_bed') }} |
+              | 在家 | {{ states('binary_sensor.yui_home') }} |
+          - type: markdown
+            grid_options:
+              columns: full
+            title: 電腦狀態
+            content: >-
+              線上：{{ states('binary_sensor.rp_pc_online') }}；
+              鎖定：{{ states('binary_sensor.rp_pc_locked') }}；
+              閒置：{{ states('sensor.rp_pc_idle') }} 秒
+
+          - type: heading
+            heading: CSI 影子模式（只記錄，不影響上面的判斷）
+          - type: markdown
+            grid_options:
+              columns: full
+            title: CSI 目前判斷
+            content: |-
+              {%- set a = state_attr('sensor.rp_csi_zone', 'confidence') -%}
+              | 項目 | 值 |
+              |---|---|
+              | CSI 影子區域 | {{ states('sensor.rp_csi_zone') }}（信心 {{ ((a | float(0)) * 100) | round(0) | int }}%） |
+              | 正式判斷（不受影響） | {{ states('sensor.yui_room_zone') }} |
+              | BLE 指紋區域 | {{ states('sensor.rp_fp_zone') }} |
+              | 各區分數（越小越近） | {% for k, v in (state_attr('sensor.rp_csi_zone', 'scores') or {}).items() %}{{ k }} {{ v }}　{% else %}—{% endfor %} |
+              | 參與節點 | {{ state_attr('sensor.rp_csi_zone', 'used_nodes') or '無' }} |
+              | 滾動基準 | 涵蓋 {{ state_attr('sensor.rp_csi_zone', 'baseline_span_h') }} 小時；距離上次安靜 {{ state_attr('sensor.rp_csi_zone', 'baseline_quiet_age_min') }} 分鐘 |
+              | 基準節點 | {{ state_attr('sensor.rp_csi_zone', 'baseline_nodes') or '無' }} |
+              | 訓練資料 | {% for k, v in (state_attr('sensor.rp_csi_zone', 'training') or {}).items() %}{{ k }}：{{ v.n }} 筆（{{ '校準＋標記' if v.src == 'cal+label' else '規則種子' }}）　{% else %}—{% endfor %} |
+              | 校準中 | {{ state_attr('sensor.rp_csi_zone', 'calibrating') or '否' }} |
+          - type: markdown
+            grid_options:
+              columns: full
+            title: CSI 與 BLE 準確度比較（弱標籤＝規則推測，不是真實答案）
+            content: |-
+              {%- macro pc(x) -%}{{ ((x * 100) | round(1) ~ '%') if x is number else '—' }}{%- endmacro -%}
+              {%- set g = namespace(e='sensor.rp_csi_agreement') -%}
+              | 指標 | 近 1 小時 | 近 24 小時 |
+              |---|---|---|
+              | CSI 對弱標籤（平衡準確率） | {{ pc(state_attr(g.e, 'weak_bal_1h')) }} | {{ pc(state_attr(g.e, 'weak_bal_24h')) }} |
+              | BLE 指紋對弱標籤（同批資料） | {{ pc(state_attr(g.e, 'ble_fp_weak_bal_1h')) }} | {{ pc(state_attr(g.e, 'ble_fp_weak_bal_24h')) }} |
+              | 正式判斷對弱標籤（偏樂觀，共用證據） | {{ pc(state_attr(g.e, 'live_weak_bal_1h')) }} | {{ pc(state_attr(g.e, 'live_weak_bal_24h')) }} |
+              | 弱標籤樣本數 | {{ state_attr(g.e, 'n_weak_1h') }} | {{ state_attr(g.e, 'n_weak_24h') }} |
+              | CSI 與正式判斷一致率 | {{ pc(state_attr(g.e, 'vs_live_1h')) }} | {{ pc(state_attr(g.e, 'vs_live_24h')) }} |
+              | CSI 與 BLE 指紋一致率 | {{ pc(state_attr(g.e, 'vs_fp_1h')) }} | {{ pc(state_attr(g.e, 'vs_fp_24h')) }} |
+
+              **標記網站（真實點選，近 7 天，{{ state_attr(g.e, 'labels_7d') }} 筆）**：CSI {{ pc(state_attr(g.e, 'csi_vs_labels_7d')) }}；BLE 指紋 {{ pc(state_attr(g.e, 'fp_vs_labels_7d')) }}；正式判斷 {{ pc(state_attr(g.e, 'live_vs_labels_7d')) }}
+
+              接手條件：CSI 在標記網站與 24 小時弱標籤都連續 7 天不輸 BLE 指紋，且每個區域召回率不低於 40%。

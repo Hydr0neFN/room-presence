@@ -1,0 +1,1910 @@
+--- a/zone-log/zone_log.py
++++ b/zone-log/zone_log.py
+@@ -1,180 +1,213 @@
+-"""Zone history log (runs on nl-pi): raw context + features for back-tracking and offline (weak-label) training.
+-
+-  presence/zone/state (retained, published by the HA automation rp_zone_to_mqtt every 10 s + on change): zone, fp zone, home,
+-      PC lock / idle, kitchen radar, work desk light (light.channel_b), light bar, link motion of the ESPHome nodes
+-  presence/<node>/apple   phone / watch IRK-labelled RSSI per node
+-  presence/<node>/csi     CSI 1 s summaries (motion, still, ok)
+-  power/powermon/state    powermon watts
+-    -> DIR/zone-v3-YYYY-MM-DD.csv   every 10 s, columns in HEAD (schema v3; zone-YYYY-MM-DD.csv = v1, zone-v2-* = v2 with a live weak_label)
+-    -> DIR/transitions.csv          ts, from, to   (every change of `zone`)
+-Phone / watch columns: mean dBm of the last 10 s, empty = not heard. csi_<node>_motion / _still: mean over the last 10 s of the
+-messages with ok=1 (the HA matcher sees the 10 s mean of motion via sensor.rp_link_<node>_motion and the latest still value).
+-Raw logging only: weak zone labels are derived offline from these columns by tools/weak_labels.py (rules can change retroactively).
+-Context older than CTX_STALE_S (HA silent) is written blank.
+-Env: MQTT_* (presence-ble.env), ZONELOG_DIR (default /var/lib/zone-log).
+-"""
+-import csv
+-import json
+-import os
+-import threading
+-import time
+-from collections import defaultdict, deque
+-
+-DIR = os.environ.get("ZONELOG_DIR", "/var/lib/zone-log")
+-NODES = ["cyd", "kitchen", "nlpi", "pcdesk", "workdesk"]
+-CSI_NODES = ["cyd", "kitchen", "pcdesk", "workdesk"]
+-PERIOD_S = 10
+-CTX_STALE_S = 90
+-POWER_WINDOW_S = 120
+-HEAD = (["ts", "zone", "fp_zone", "home", "pc_online", "pc_locked", "pc_idle", "radar", "radar_cm",
+-         "power_w", "power_max120", "wd_light", "wd_light_age_s", "lightbar", "lightbar_age_s",
+-         "link_kitchenradar", "link_neopixel", "link_kitchenrssi", "kitchen_light", "kitchen_light_age_s", "neopixel",
+-         "neopixel_age_s", "gaming", "gaming_pc_w", "radar_moving", "radar_move_cm", "radar_still_cm", "radar_move_en",
+-         "radar_still_en"]
+-        + [f"{n}_{k}" for n in NODES for k in ("phone", "watch")]
+-        + [f"csi_{n}_{k}" for n in CSI_NODES for k in ("motion", "still")])
+-CTX_KEYS = ["zone", "fp", "home", "pc_online", "pc_locked", "pc_idle", "radar", "radar_cm", "wd_light", "wd_light_ts",
+-            "lightbar", "lightbar_ts", "link_kitchenradar", "link_neopixel", "link_kitchenrssi", "kitchen_light", "kitchen_light_ts",
+-            "neopixel", "neopixel_ts", "gaming", "gaming_pc_w", "radar_moving", "radar_move_cm", "radar_still_cm", "radar_move_en",
+-            "radar_still_en"]
+-
+-
+-def iso(t):
+-    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t))
+-
+-
+-def append(path, head, row):
+-    new = not os.path.exists(path)
+-    with open(path, "a", newline="", encoding="utf-8") as f:
+-        w = csv.writer(f)
+-        if new:
+-            w.writerow(head)
+-        w.writerow(row)
+-
+-
+-def mean_or_blank(vals, nd=1):
+-    return round(sum(vals) / len(vals), nd) if vals else ""
+-
+-
+-class State:
+-    """Buffers fed by MQTT messages and the row builder; no I/O, so it can be tested with synthetic times."""
+-
+-    def __init__(self):
+-        self.sig = defaultdict(deque)       # (node, "phone"|"watch") -> deque[(t, avg)]
+-        self.csi = defaultdict(deque)       # node -> deque[(t, motion, still)]
+-        self.power = deque()                # (t, watts)
+-        self.ctx = {}
+-        self.ctx_t = 0.0
+-
+-    def add_ctx(self, now, p):
+-        self.ctx = {k: p.get(k, "") for k in CTX_KEYS}
+-        self.ctx_t = now
+-
+-    def add_apple(self, now, node, p):
+-        for e in p.get("irk") or []:
+-            if e.get("id") in ("phone", "watch") and e.get("n", 0) > 0:
+-                self.sig[(node, e["id"])].append((now, float(e["avg"])))
+-
+-    def add_csi(self, now, node, p):
+-        if int(p.get("ok", 0)) == 1 and p.get("motion") is not None:
+-            still = float(p["still"]) if p.get("still") is not None and float(p["still"]) >= 0 else None   # -1 = no baseline yet
+-            self.csi[node].append((now, float(p["motion"]), still))
+-
+-    def add_power(self, now, p):
+-        if p.get("watts") is not None:
+-            self.power.append((now, float(p["watts"])))
+-
+-    def make_row(self, now):
+-        cutoff = now - PERIOD_S
+-        sig_cols = []
+-        for n in NODES:
+-            for k in ("phone", "watch"):
+-                q = self.sig[(n, k)]
+-                while q and q[0][0] < cutoff:
+-                    q.popleft()
+-                sig_cols.append(mean_or_blank([x for _, x in q]))
+-        csi_cols = []
+-        for n in CSI_NODES:
+-            q = self.csi[n]
+-            while q and q[0][0] < cutoff:
+-                q.popleft()
+-            csi_cols += [mean_or_blank([m for _, m, _ in q]), mean_or_blank([s for _, _, s in q if s is not None])]
+-        while self.power and self.power[0][0] < now - POWER_WINDOW_S:
+-            self.power.popleft()
+-        power_w = self.power[-1][1] if self.power and self.power[-1][0] >= cutoff else ""
+-        power_max = max(w for _, w in self.power) if self.power else ""
+-        fresh = now - self.ctx_t <= CTX_STALE_S
+-        c = self.ctx if fresh else {}
+-
+-        def age(key):
+-            ts = c.get(key)
+-            try:
+-                return round(now - float(ts)) if ts and float(ts) > 0 else ""
+-            except (TypeError, ValueError):
+-                return ""
+-        wd_age, lb_age = age("wd_light_ts"), age("lightbar_ts")
+-        return ([iso(now), c.get("zone", ""), c.get("fp", ""), c.get("home", ""),
+-                 c.get("pc_online", ""), c.get("pc_locked", ""), c.get("pc_idle", ""), c.get("radar", ""), c.get("radar_cm", ""),
+-                 power_w, power_max, c.get("wd_light", ""), wd_age, c.get("lightbar", ""), lb_age,
+-                 c.get("link_kitchenradar", ""), c.get("link_neopixel", ""), c.get("link_kitchenrssi", ""),
+-                 c.get("kitchen_light", ""), age("kitchen_light_ts"), c.get("neopixel", ""), age("neopixel_ts"),
+-                 c.get("gaming", ""), c.get("gaming_pc_w", ""), c.get("radar_moving", ""), c.get("radar_move_cm", ""),
+-                 c.get("radar_still_cm", ""), c.get("radar_move_en", ""), c.get("radar_still_en", "")]
+-                + sig_cols + csi_cols)
+-
+-
+-state = State()
+-lock = threading.Lock()
+-prev_zone = [None]
+-
+-
+-def on_message(c, u, m):
+-    now = time.time()
+-    try:
+-        p = json.loads(m.payload)
+-        with lock:
+-            if m.topic == "presence/zone/state":
+-                state.add_ctx(now, p)
+-                if prev_zone[0] is not None and p.get("zone") != prev_zone[0]:
+-                    append(os.path.join(DIR, "transitions.csv"), ["ts", "from", "to"], [iso(now), prev_zone[0], p.get("zone")])
+-                prev_zone[0] = p.get("zone")
+-            elif m.topic == "power/powermon/state":
+-                state.add_power(now, p)
+-            else:
+-                node, kind = m.topic.split("/")[1:3]
+-                if kind == "apple":
+-                    state.add_apple(now, node, p)
+-                elif kind == "csi" and node in CSI_NODES:
+-                    state.add_csi(now, node, p)
+-    except (ValueError, TypeError, IndexError, AttributeError, OSError):
+-        pass
+-
+-
+-def writer():
+-    while True:
+-        time.sleep(PERIOD_S)
+-        now = time.time()
+-        with lock:
+-            row = state.make_row(now)
+-        try:
+-            append(os.path.join(DIR, "zone-v3-" + time.strftime("%Y-%m-%d", time.localtime(now)) + ".csv"), HEAD, row)
+-        except OSError:
+-            pass
+-
+-
+-def main():
+-    import paho.mqtt.client as mqtt
+-    os.makedirs(DIR, exist_ok=True)
+-    c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id="zone_log") if hasattr(mqtt, "CallbackAPIVersion") \
+-        else mqtt.Client(client_id="zone_log")
+-    c.username_pw_set(os.environ["MQTT_USER"], os.environ["MQTT_PASS"])
+-    c.on_connect = lambda cl, u, f, rc: [cl.subscribe(t) for t in
+-                                         ("presence/zone/state", "presence/+/apple", "presence/+/csi", "power/powermon/state")]
+-    c.on_message = on_message
+-    c.connect(os.environ.get("MQTT_HOST", "127.0.0.1"), int(os.environ.get("MQTT_PORT", "1883")), 60)
+-    threading.Thread(target=writer, daemon=True).start()
+-    c.loop_forever()
+-
+-
+-if __name__ == "__main__":
+-    main()
++"""Zone history log (runs on nl-pi): raw context + features for back-tracking and offline (weak-label) training.
++
++  presence/zone/state (retained, published by the HA automation rp_zone_to_mqtt every 10 s + on change): zone, fp zone, home,
++      PC lock / idle, kitchen radar, work desk light (light.channel_b), light bar, link motion of the ESPHome nodes
++  presence/<node>/apple   phone / watch IRK-labelled RSSI per node
++  presence/<node>/csi     CSI 1 s summaries (motion, still, ok)
++  power/powermon/state    powermon watts
++  presence/csi/state      CSI shadow zone (presence-csi service, sensor.rp_csi_zone) -> columns csi_zone, csi_conf (shadow only, nothing reads them back)
++    -> DIR/zone-v3-YYYY-MM-DD.csv   every 10 s, columns in HEAD (schema v3; zone-YYYY-MM-DD.csv = v1, zone-v2-* = v2 with a live weak_label)
++    -> DIR/transitions.csv          ts, from, to   (every change of `zone`)
++Phone / watch columns: mean dBm of the last 10 s, empty = not heard. csi_<node>_motion / _still: mean over the last 10 s of the
++messages with ok=1 (the HA matcher sees the 10 s mean of motion via sensor.rp_link_<node>_motion and the latest still value).
++Raw logging only: weak zone labels are derived offline from these columns by tools/weak_labels.py (rules can change retroactively).
++Context older than CTX_STALE_S (HA silent) is written blank.
++Env: MQTT_* (presence-ble.env), ZONELOG_DIR (default /var/lib/zone-log).
++"""
++import csv
++import json
++import os
++import threading
++import time
++from collections import defaultdict, deque
++
++DIR = os.environ.get("ZONELOG_DIR", "/var/lib/zone-log")
++NODES = ["cyd", "kitchen", "nlpi", "pcdesk", "workdesk"]
++CSI_NODES = ["cyd", "kitchen", "pcdesk", "workdesk"]
++PERIOD_S = 10
++CTX_STALE_S = 90
++POWER_WINDOW_S = 120
++HEAD = (["ts", "zone", "fp_zone", "home", "pc_online", "pc_locked", "pc_idle", "radar", "radar_cm",
++         "power_w", "power_max120", "wd_light", "wd_light_age_s", "lightbar", "lightbar_age_s",
++         "link_kitchenradar", "link_neopixel", "link_kitchenrssi", "kitchen_light", "kitchen_light_age_s", "neopixel",
++         "neopixel_age_s", "gaming", "gaming_pc_w", "radar_moving", "radar_move_cm", "radar_still_cm", "radar_move_en",
++         "radar_still_en"]
++        + [f"{n}_{k}" for n in NODES for k in ("phone", "watch")]
++        + [f"csi_{n}_{k}" for n in CSI_NODES for k in ("motion", "still")]
++        + ["csi_zone", "csi_conf"])
++OLD_COLS = 2   # csi_zone, csi_conf were appended to HEAD on 2026-10-30; files written before have HEAD[:-OLD_COLS]
++CTX_KEYS = ["zone", "fp", "home", "pc_online", "pc_locked", "pc_idle", "radar", "radar_cm", "wd_light", "wd_light_ts",
++            "lightbar", "lightbar_ts", "link_kitchenradar", "link_neopixel", "link_kitchenrssi", "kitchen_light", "kitchen_light_ts",
++            "neopixel", "neopixel_ts", "gaming", "gaming_pc_w", "radar_moving", "radar_move_cm", "radar_still_cm", "radar_move_en",
++            "radar_still_en"]
++
++
++def iso(t):
++    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t))
++
++
++def append(path, head, row):
++    new = not os.path.exists(path)
++    with open(path, "a", newline="", encoding="utf-8") as f:
++        w = csv.writer(f)
++        if new:
++            w.writerow(head)
++        w.writerow(row)
++
++
++def migrate(path):
++    """Today's file written by the previous schema (HEAD without csi_zone, csi_conf): append two empty columns in place."""
++    if not os.path.exists(path):
++        return False
++    with open(path, newline="", encoding="utf-8") as f:
++        rows = list(csv.reader(f))
++    if not rows or rows[0] != HEAD[:-OLD_COLS]:
++        return False
++    tmp = path + ".mig"
++    with open(tmp, "w", newline="", encoding="utf-8") as f:
++        w = csv.writer(f)
++        w.writerow(HEAD)
++        for r in rows[1:]:
++            w.writerow(r + [""] * OLD_COLS)
++    os.replace(tmp, path)
++    return True
++
++
++def mean_or_blank(vals, nd=1):
++    return round(sum(vals) / len(vals), nd) if vals else ""
++
++
++class State:
++    """Buffers fed by MQTT messages and the row builder; no I/O, so it can be tested with synthetic times."""
++
++    def __init__(self):
++        self.sig = defaultdict(deque)       # (node, "phone"|"watch") -> deque[(t, avg)]
++        self.csi = defaultdict(deque)       # node -> deque[(t, motion, still)]
++        self.power = deque()                # (t, watts)
++        self.csi_state = {}                 # latest presence/csi/state payload
++        self.ctx = {}
++        self.ctx_t = 0.0
++
++    def add_ctx(self, now, p):
++        self.ctx = {k: p.get(k, "") for k in CTX_KEYS}
++        self.ctx_t = now
++
++    def add_apple(self, now, node, p):
++        for e in p.get("irk") or []:
++            if e.get("id") in ("phone", "watch") and e.get("n", 0) > 0:
++                self.sig[(node, e["id"])].append((now, float(e["avg"])))
++
++    def add_csi(self, now, node, p):
++        if int(p.get("ok", 0)) == 1 and p.get("motion") is not None:
++            still = float(p["still"]) if p.get("still") is not None and float(p["still"]) >= 0 else None   # -1 = no baseline yet
++            self.csi[node].append((now, float(p["motion"]), still))
++
++    def add_csi_state(self, p):
++        self.csi_state = p
++
++    def add_power(self, now, p):
++        if p.get("watts") is not None:
++            self.power.append((now, float(p["watts"])))
++
++    def make_row(self, now):
++        cutoff = now - PERIOD_S
++        sig_cols = []
++        for n in NODES:
++            for k in ("phone", "watch"):
++                q = self.sig[(n, k)]
++                while q and q[0][0] < cutoff:
++                    q.popleft()
++                sig_cols.append(mean_or_blank([x for _, x in q]))
++        csi_cols = []
++        for n in CSI_NODES:
++            q = self.csi[n]
++            while q and q[0][0] < cutoff:
++                q.popleft()
++            csi_cols += [mean_or_blank([m for _, m, _ in q]), mean_or_blank([s for _, _, s in q if s is not None])]
++        while self.power and self.power[0][0] < now - POWER_WINDOW_S:
++            self.power.popleft()
++        power_w = self.power[-1][1] if self.power and self.power[-1][0] >= cutoff else ""
++        power_max = max(w for _, w in self.power) if self.power else ""
++        fresh = now - self.ctx_t <= CTX_STALE_S
++        try:
++            cs = self.csi_state if now - float(self.csi_state.get("ts", 0)) <= CTX_STALE_S else {}
++        except (TypeError, ValueError):
++            cs = {}
++        c = self.ctx if fresh else {}
++
++        def age(key):
++            ts = c.get(key)
++            try:
++                return round(now - float(ts)) if ts and float(ts) > 0 else ""
++            except (TypeError, ValueError):
++                return ""
++        wd_age, lb_age = age("wd_light_ts"), age("lightbar_ts")
++        return ([iso(now), c.get("zone", ""), c.get("fp", ""), c.get("home", ""),
++                 c.get("pc_online", ""), c.get("pc_locked", ""), c.get("pc_idle", ""), c.get("radar", ""), c.get("radar_cm", ""),
++                 power_w, power_max, c.get("wd_light", ""), wd_age, c.get("lightbar", ""), lb_age,
++                 c.get("link_kitchenradar", ""), c.get("link_neopixel", ""), c.get("link_kitchenrssi", ""),
++                 c.get("kitchen_light", ""), age("kitchen_light_ts"), c.get("neopixel", ""), age("neopixel_ts"),
++                 c.get("gaming", ""), c.get("gaming_pc_w", ""), c.get("radar_moving", ""), c.get("radar_move_cm", ""),
++                 c.get("radar_still_cm", ""), c.get("radar_move_en", ""), c.get("radar_still_en", "")]
++                + sig_cols + csi_cols + [cs.get("zone", ""), cs.get("confidence", "")])
++
++
++state = State()
++lock = threading.Lock()
++prev_zone = [None]
++
++
++def on_message(c, u, m):
++    now = time.time()
++    try:
++        p = json.loads(m.payload)
++        with lock:
++            if m.topic == "presence/zone/state":
++                state.add_ctx(now, p)
++                if prev_zone[0] is not None and p.get("zone") != prev_zone[0]:
++                    append(os.path.join(DIR, "transitions.csv"), ["ts", "from", "to"], [iso(now), prev_zone[0], p.get("zone")])
++                prev_zone[0] = p.get("zone")
++            elif m.topic == "presence/csi/state":
++                state.add_csi_state(p)
++            elif m.topic == "power/powermon/state":
++                state.add_power(now, p)
++            else:
++                node, kind = m.topic.split("/")[1:3]
++                if kind == "apple":
++                    state.add_apple(now, node, p)
++                elif kind == "csi" and node in CSI_NODES:
++                    state.add_csi(now, node, p)
++    except (ValueError, TypeError, IndexError, AttributeError, OSError):
++        pass
++
++
++def writer():
++    while True:
++        time.sleep(PERIOD_S)
++        now = time.time()
++        with lock:
++            row = state.make_row(now)
++        try:
++            append(os.path.join(DIR, "zone-v3-" + time.strftime("%Y-%m-%d", time.localtime(now)) + ".csv"), HEAD, row)
++        except OSError:
++            pass
++
++
++def main():
++    import paho.mqtt.client as mqtt
++    os.makedirs(DIR, exist_ok=True)
++    migrate(os.path.join(DIR, "zone-v3-" + time.strftime("%Y-%m-%d") + ".csv"))
++    c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id="zone_log") if hasattr(mqtt, "CallbackAPIVersion") \
++        else mqtt.Client(client_id="zone_log")
++    c.username_pw_set(os.environ["MQTT_USER"], os.environ["MQTT_PASS"])
++    c.on_connect = lambda cl, u, f, rc: [cl.subscribe(t) for t in
++                                         ("presence/zone/state", "presence/+/apple", "presence/+/csi", "power/powermon/state",
++                                          "presence/csi/state")]
++    c.on_message = on_message
++    c.connect(os.environ.get("MQTT_HOST", "127.0.0.1"), int(os.environ.get("MQTT_PORT", "1883")), 60)
++    threading.Thread(target=writer, daemon=True).start()
++    c.loop_forever()
++
++
++if __name__ == "__main__":
++    main()
+--- a/homeassistant/config/dashboards/house.yaml
++++ b/homeassistant/config/dashboards/house.yaml
+@@ -40,6 +40,14 @@
+     max_columns: 4
+     badges:
+       - type: entity
++        entity: sensor.yui_room_zone
++        name: 區域
++        icon: mdi:map-marker
++      - type: entity
++        entity: sensor.rp_csi_label
++        name: CSI（影子）
++        icon: mdi:wifi-marker
++      - type: entity
+         entity: sensor.room_environment_temperature
+         name: 室溫
+       - type: entity
+@@ -1099,3 +1107,42 @@
+               線上：{{ states('binary_sensor.rp_pc_online') }}；
+               鎖定：{{ states('binary_sensor.rp_pc_locked') }}；
+               閒置：{{ states('sensor.rp_pc_idle') }} 秒
++
++          - type: heading
++            heading: CSI 影子模式（只記錄，不影響上面的判斷）
++          - type: markdown
++            grid_options:
++              columns: full
++            title: CSI 目前判斷
++            content: |-
++              {%- set a = state_attr('sensor.rp_csi_zone', 'confidence') -%}
++              | 項目 | 值 |
++              |---|---|
++              | CSI 影子區域 | {{ states('sensor.rp_csi_zone') }}（信心 {{ ((a | float(0)) * 100) | round(0) | int }}%） |
++              | 正式判斷（不受影響） | {{ states('sensor.yui_room_zone') }} |
++              | BLE 指紋區域 | {{ states('sensor.rp_fp_zone') }} |
++              | 各區分數（越小越近） | {% for k, v in (state_attr('sensor.rp_csi_zone', 'scores') or {}).items() %}{{ k }} {{ v }}　{% else %}—{% endfor %} |
++              | 參與節點 | {{ state_attr('sensor.rp_csi_zone', 'used_nodes') or '無' }} |
++              | 滾動基準 | 涵蓋 {{ state_attr('sensor.rp_csi_zone', 'baseline_span_h') }} 小時；距離上次安靜 {{ state_attr('sensor.rp_csi_zone', 'baseline_quiet_age_min') }} 分鐘 |
++              | 基準節點 | {{ state_attr('sensor.rp_csi_zone', 'baseline_nodes') or '無' }} |
++              | 訓練資料 | {% for k, v in (state_attr('sensor.rp_csi_zone', 'training') or {}).items() %}{{ k }}：{{ v.n }} 筆（{{ '校準＋標記' if v.src == 'cal+label' else '規則種子' }}）　{% else %}—{% endfor %} |
++              | 校準中 | {{ state_attr('sensor.rp_csi_zone', 'calibrating') or '否' }} |
++          - type: markdown
++            grid_options:
++              columns: full
++            title: CSI 與 BLE 準確度比較（弱標籤＝規則推測，不是真實答案）
++            content: |-
++              {%- macro pc(x) -%}{{ ((x * 100) | round(1) ~ '%') if x is number else '—' }}{%- endmacro -%}
++              {%- set g = namespace(e='sensor.rp_csi_agreement') -%}
++              | 指標 | 近 1 小時 | 近 24 小時 |
++              |---|---|---|
++              | CSI 對弱標籤（平衡準確率） | {{ pc(state_attr(g.e, 'weak_bal_1h')) }} | {{ pc(state_attr(g.e, 'weak_bal_24h')) }} |
++              | BLE 指紋對弱標籤（同批資料） | {{ pc(state_attr(g.e, 'ble_fp_weak_bal_1h')) }} | {{ pc(state_attr(g.e, 'ble_fp_weak_bal_24h')) }} |
++              | 正式判斷對弱標籤（偏樂觀，共用證據） | {{ pc(state_attr(g.e, 'live_weak_bal_1h')) }} | {{ pc(state_attr(g.e, 'live_weak_bal_24h')) }} |
++              | 弱標籤樣本數 | {{ state_attr(g.e, 'n_weak_1h') }} | {{ state_attr(g.e, 'n_weak_24h') }} |
++              | CSI 與正式判斷一致率 | {{ pc(state_attr(g.e, 'vs_live_1h')) }} | {{ pc(state_attr(g.e, 'vs_live_24h')) }} |
++              | CSI 與 BLE 指紋一致率 | {{ pc(state_attr(g.e, 'vs_fp_1h')) }} | {{ pc(state_attr(g.e, 'vs_fp_24h')) }} |
++
++              **標記網站（真實點選，近 7 天，{{ state_attr(g.e, 'labels_7d') }} 筆）**：CSI {{ pc(state_attr(g.e, 'csi_vs_labels_7d')) }}；BLE 指紋 {{ pc(state_attr(g.e, 'fp_vs_labels_7d')) }}；正式判斷 {{ pc(state_attr(g.e, 'live_vs_labels_7d')) }}
++
++              接手條件：CSI 在標記網站與 24 小時弱標籤都連續 7 天不輸 BLE 指紋，且每個區域召回率不低於 40%。
+--- /dev/null
++++ b/presence-csi/csi_features.py
+@@ -0,0 +1,245 @@
++"""CSI shadow zoning: pure logic (no I/O, stdlib only), shared by the service, the offline replay and the scoring tool.
++
++Per node the firmware sends presence/<node>/csi every ~3 s (motion, still in per-mille; ok=0 = no window). The zone log and the
++service both reduce that to 10 s means. This module turns those 10 s means into baseline-normalised "z" features and classifies
++them against per-zone centroids that were captured while the owner stood in each zone.
++
++  Baseline   per (node, feature): rolling window of log1p(value); location = a LOW quantile (the quiet floor: night / away /
++             nobody moving), scale = robust spread (MAD) of the whole window. z = (log1p(x) - floor) / scale, so "quiet" is ~0 and
++             activity near the node is a positive number of sigmas. Drift of the floor (reboots, channel changes, a different
++             day) is followed by the window, which is what the raw fingerprint features could not do.
++  ZoneModel  nearest centroid in z space, pooled per-feature scale, per-feature clipping, distance = RMS over the used features.
++"""
++import math
++import time
++from collections import deque
++
++NODES = ("cyd", "kitchen", "pcdesk", "workdesk")
++KINDS = ("motion", "still")
++NAMES = tuple(f"{n}_{k}" for n in NODES for k in KINDS)
++ZONES = ("kitchen", "work_desk", "pc_desk", "bed", "bathroom")
++
++WINDOW_S = 8 * 3600     # baseline window (replay: 8 h best; 24 h cannot follow the day-to-day drift)
++LOC_Q = 0.1             # quiet floor = this quantile of log1p(value)
++REFRESH_S = 300
++MIN_N = 360             # 1 h of 10 s points before a baseline exists
++SCALE_FLOOR = 0.15      # log units
++Z_CLIP = (-4.0, 12.0)
++SMOOTH_N = 6            # classify the mean of the last 6 windows (60 s)
++
++
++def g(x):
++    return math.log1p(max(float(x), 0.0))
++
++
++def quantile(sorted_vals, q):
++    n = len(sorted_vals)
++    if n == 0:
++        return None
++    pos = q * (n - 1)
++    lo = int(pos)
++    hi = min(lo + 1, n - 1)
++    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (pos - lo)
++
++
++def median(vals):
++    return quantile(sorted(vals), 0.5)
++
++
++class Baseline:
++    """Rolling robust baseline. add() every 10 s window, z() to normalise, refresh() is called by add() when due."""
++
++    def __init__(self, window_s=WINDOW_S, loc_q=LOC_Q, refresh_s=REFRESH_S, min_n=MIN_N, scale_floor=SCALE_FLOOR):
++        self.window_s, self.loc_q, self.refresh_s, self.min_n, self.scale_floor = window_s, loc_q, refresh_s, min_n, scale_floor
++        self.pts = {}          # name -> deque[(t, g)]
++        self.ref = {}          # name -> dict(loc, scale, n, span_s, t)
++        self.last_quiet = {}   # name -> t of the newest point within 0.5 sigma of the floor
++        self.last_refresh = 0.0
++
++    def add(self, t, name, raw):
++        if raw is None:
++            return
++        v = g(raw)
++        self.pts.setdefault(name, deque()).append((t, v))
++        r = self.ref.get(name)
++        if r and v <= r["loc"] + 0.5 * r["scale"]:
++            self.last_quiet[name] = t
++
++    def tick(self, t):
++        if t - self.last_refresh >= self.refresh_s:
++            self.refresh(t)
++
++    def refresh(self, t):
++        self.last_refresh = t
++        for name, q in self.pts.items():
++            while q and q[0][0] < t - self.window_s:
++                q.popleft()
++            if len(q) < self.min_n:
++                self.ref.pop(name, None)
++                continue
++            vals = sorted(v for _, v in q)
++            med = quantile(vals, 0.5)
++            mad = quantile(sorted(abs(v - med) for v in vals), 0.5) * 1.4826
++            self.ref[name] = {"loc": quantile(vals, self.loc_q), "scale": max(mad, self.scale_floor), "n": len(vals),
++                              "span_s": q[-1][0] - q[0][0], "t": t}
++
++    def z(self, name, raw):
++        r = self.ref.get(name)
++        if r is None or raw is None:
++            return None
++        return max(Z_CLIP[0], min(Z_CLIP[1], (g(raw) - r["loc"]) / r["scale"]))
++
++    def zvec(self, raw):
++        """raw {name: value|None} -> {name: z} for the names that have a baseline."""
++        out = {}
++        for name, v in raw.items():
++            z = self.z(name, v)
++            if z is not None:
++                out[name] = z
++        return out
++
++    def reset(self, name):
++        """Node rebooted: its firmware 'still' baseline restarted, so the old window no longer describes it."""
++        self.pts.pop(name, None)
++        self.ref.pop(name, None)
++        self.last_quiet.pop(name, None)
++
++    def info(self, t):
++        """Per-name summary for the HA attributes."""
++        out = {}
++        for name, r in self.ref.items():
++            lq = self.last_quiet.get(name)
++            out[name] = {"loc": round(r["loc"], 3), "scale": round(r["scale"], 3), "span_h": round(r["span_s"] / 3600, 1),
++                         "quiet_age_min": round((t - lq) / 60) if lq else None}
++        return out
++
++    def dump(self):
++        return {"window_s": self.window_s, "pts": {n: [[int(t), round(v, 3)] for t, v in q] for n, q in self.pts.items()},
++                "last_quiet": self.last_quiet}
++
++    def load(self, d):
++        for n, pts in d.get("pts", {}).items():
++            self.pts[n] = deque((float(t), float(v)) for t, v in pts)
++        self.last_quiet = {n: float(t) for n, t in d.get("last_quiet", {}).items()}
++        newest = max((q[-1][0] for q in self.pts.values() if q), default=None)
++        if newest:
++            self.refresh(newest)
++            self.last_refresh = 0.0
++
++
++SD_FLOOR = 1.0
++FEATURE_WEIGHTS = {f"{n}_motion": 0.15 for n in NODES}   # replay: motion alone 0.28 balanced accuracy, still alone 0.67
++
++
++class ZoneModel:
++    """Nearest centroid in z space. samples: iterable of (zone, {name: z})."""
++
++    def __init__(self, sd_floor=SD_FLOOR, weights=None):
++        self.sd_floor = sd_floor
++        self.weights = weights or {}   # name -> weight (default 1); motion is noisy, see FEATURE_WEIGHTS
++        self.mu = {}      # zone -> {name: median z}
++        self.sd = {}      # name -> pooled within-zone spread
++        self.n = {}       # zone -> number of samples
++
++    def fit(self, samples):
++        by = {}
++        for zone, zv in samples:
++            by.setdefault(zone, []).append(zv)
++        self.mu, self.n = {}, {z: len(v) for z, v in by.items()}
++        dev = {}
++        for zone, vs in by.items():
++            mu = {}
++            for name in {n for zv in vs for n in zv}:
++                col = [zv[name] for zv in vs if name in zv]
++                mu[name] = median(col)
++                dev.setdefault(name, []).extend(abs(x - mu[name]) for x in col)
++            self.mu[zone] = mu
++        self.sd = {name: max(1.4826 * median(d), self.sd_floor) for name, d in dev.items()}
++        return self
++
++    def dist(self, zv):
++        """{zone: RMS distance over the names both the sample and the zone centroid have}, plus the names used."""
++        out, used = {}, set()
++        for zone, mu in self.mu.items():
++            acc, k = 0.0, 0.0
++            for name, z in zv.items():
++                if name in mu:
++                    w = self.weights.get(name, 1.0)
++                    acc += w * ((z - mu[name]) / self.sd.get(name, self.sd_floor)) ** 2
++                    k += w
++                    used.add(name)
++            if k:
++                out[zone] = math.sqrt(acc / k)
++        return out, sorted(used)
++
++    def dump(self):
++        return {"mu": self.mu, "sd": self.sd, "n": self.n}
++
++
++def smooth_dist(history):
++    """history: iterable of {zone: dist}; per-zone mean over the entries that have the zone."""
++    acc, cnt = {}, {}
++    for d in history:
++        for z, v in d.items():
++            acc[z] = acc.get(z, 0.0) + v
++            cnt[z] = cnt.get(z, 0) + 1
++    return {z: acc[z] / cnt[z] for z in acc}
++
++
++def decide(dists):
++    """-> (zone, confidence) from {zone: distance}. confidence = relative margin to the runner-up, 0..1."""
++    if not dists:
++        return None, 0.0
++    order = sorted(dists.items(), key=lambda kv: kv[1])
++    if len(order) == 1:
++        return order[0][0], 0.0
++    d1, d2 = order[0][1], order[1][1]
++    return order[0][0], round(max(0.0, (d2 - d1) / max(d2, 1e-9)), 3)
++
++
++# ---------------------------------------------------------------- weak labels (rules, no CSI used)
++def weak_label(c):
++    """c: dict home(bool) pc_online(bool) pc_locked(bool|None) pc_idle(float|None) radar(bool) radar_cm(float|None)
++    wd_light(bool) wd_age_s(float|None) kitchen_light(bool) hour(int) -> zone | 'away' | None.
++    High-precision rules from context that does not touch CSI; 'bed' is the loosest (night, PC quiet, nothing else on)."""
++    if not c["home"]:
++        return "away"
++    idle = c["pc_idle"]
++    if c["pc_online"] and c["pc_locked"] is False and idle is not None and idle <= 60:
++        return "pc_desk"
++    pc_quiet = idle is None or idle >= 300
++    rad = c["radar"]
++    if rad and (c["radar_cm"] is None or c["radar_cm"] <= 150) and pc_quiet:
++        return "kitchen"
++    if c["wd_light"] and c["wd_age_s"] is not None and c["wd_age_s"] <= 900 and not rad and pc_quiet:
++        return "work_desk"
++    h = c["hour"]
++    if (h >= 23 or h < 7) and (idle is None or idle >= 1800) and not rad and not c["wd_light"] and not c["kitchen_light"]:
++        return "bed"
++    return None
++
++
++def _f(x):
++    try:
++        return float(x)
++    except (TypeError, ValueError):
++        return None
++
++
++def weak_from_row(r, hour):
++    """zone-log CSV row (strings) -> weak label."""
++    return weak_label({"home": r.get("home") != "off", "pc_online": r.get("pc_online") == "on",
++                       "pc_locked": (r.get("pc_locked") == "on") if r.get("pc_locked") in ("on", "off") else None,
++                       "pc_idle": _f(r.get("pc_idle")), "radar": r.get("radar") == "on", "radar_cm": _f(r.get("radar_cm")),
++                       "wd_light": r.get("wd_light") == "on", "wd_age_s": _f(r.get("wd_light_age_s")),
++                       "kitchen_light": r.get("kitchen_light") == "on", "hour": hour})
++
++
++def weak_from_ctx(p, now):
++    """presence/zone/state payload (+ epoch now) -> weak label. Ages come from the *_ts epochs."""
++    ts = _f(p.get("wd_light_ts"))
++    return weak_label({"home": p.get("home") != "off", "pc_online": p.get("pc_online") == "on",
++                       "pc_locked": (p.get("pc_locked") == "on") if p.get("pc_locked") in ("on", "off") else None,
++                       "pc_idle": _f(p.get("pc_idle")), "radar": p.get("radar") == "on", "radar_cm": _f(p.get("radar_cm")),
++                       "wd_light": p.get("wd_light") == "on", "wd_age_s": (now - ts) if ts and ts > 0 else None,
++                       "kitchen_light": p.get("kitchen_light") == "on", "hour": time.localtime(now).tm_hour})
+--- /dev/null
++++ b/presence-csi/csi_replay.py
+@@ -0,0 +1,218 @@
++#!/usr/bin/env python3
++"""Offline replay of the CSI shadow pipeline (baseline + classifier) on zone-log CSVs.
++
++  csi_replay.py --logdir /var/lib/zone-log                 # cross-validated accuracy vs rule weak labels, vs BLE
++  csi_replay.py --logdir DIR --days 2026-10-28,2026-10-29  # only some days
++  csi_replay.py --logdir DIR --compare                     # also static-normalisation and baseline-window sweeps
++
++CV = leave-one-day-out over the days that have weak labels: the model is fitted on the z windows of the other days and
++scored on the held-out day. The weak labels are RULES on non-CSI context (csi_features.weak_label), not ground truth:
++  pc_desk = PC active; kitchen = radar on; work_desk = work-desk light just operated; bed = night with the PC quiet.
++BLE columns of the same CSVs are scored against the same labels: fp_zone (BLE fingerprint only) and zone (the live
++yui_room_zone, which shares evidence with the rules, so its score is optimistic and shown only for reference).
++The functions load_rows / run / seed_samples are also used by the service to bootstrap its baseline from the zone log.
++Stdlib only (runs on nl-pi without numpy). Python >= 3.9.
++"""
++import argparse
++import collections
++import csv
++import datetime
++import glob
++import os
++import sys
++import time
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++import csi_features as cf  # noqa: E402
++
++
++def num(x):
++    try:
++        return float(x)
++    except (TypeError, ValueError):
++        return None
++
++
++def load_rows(logdir, days=None, last_n_days=None):
++    files = sorted(glob.glob(os.path.join(logdir, "zone-v3-*.csv")))
++    if days:
++        files = [f for f in files if any(d in f for d in days)]
++    elif last_n_days:
++        files = files[-last_n_days:]
++    rows = []
++    for f in files:
++        with open(f, newline="", encoding="utf-8") as fh:
++            for r in csv.DictReader(fh):
++                try:
++                    dt = datetime.datetime.fromisoformat(r["ts"])
++                except (ValueError, KeyError):
++                    continue
++                r["_t"] = time.mktime(dt.timetuple())
++                r["_day"] = r["ts"][:10]
++                r["_hour"] = dt.hour
++                rows.append(r)
++    return rows
++
++
++def raw_of(r):
++    return {n: num(r.get("csi_" + n)) for n in cf.NAMES}
++
++
++def smooth(buf):
++    acc = {}
++    for zv in buf:
++        for n, v in zv.items():
++            acc.setdefault(n, []).append(v)
++    return {n: sum(v) / len(v) for n, v in acc.items()}
++
++
++def run(rows, baseline=None, smooth_n=cf.SMOOTH_N):
++    """Feed the rows through a Baseline in order. Returns (baseline, [dict(row, t, z, zs, label)]).
++    z = this window's z vector (before the window joins the baseline), zs = mean of the last smooth_n z vectors."""
++    bl = baseline or cf.Baseline()
++    buf = collections.deque(maxlen=smooth_n)
++    out = []
++    t0 = rows[0]["_t"] if rows else 0
++    for r in rows:
++        t = r["_t"]
++        raw = raw_of(r)
++        bl.tick(t)
++        z = bl.zvec(raw)
++        for n, v in raw.items():
++            bl.add(t, n, v)
++        buf.append(z)
++        out.append({"row": r, "t": t, "z": z, "zs": smooth(buf), "label": cf.weak_from_row(r, r["_hour"]),
++                    "warm": t < t0 + bl.window_s})   # first window of the log: no quiet reference yet, not scored
++    return bl, out
++
++
++def seed_samples(res, per_zone=1500):
++    """Evenly thinned (zone, zs) samples of the weak-labelled windows, for bootstrapping a model before any calibration."""
++    by = collections.defaultdict(list)
++    for x in res:
++        if x["label"] in cf.ZONES and len(x["zs"]) >= 3 and not x.get("warm"):
++            by[x["label"]].append(x)
++    out = []
++    for zone, xs in by.items():
++        step = max(1, len(xs) // per_zone)
++        for x in xs[::step]:
++            out.append({"zone": zone, "z": {k: round(v, 3) for k, v in x["zs"].items()}, "ts": int(x["t"]), "src": "seed"})
++    return out
++
++
++def new_model():
++    return cf.ZoneModel(weights=cf.FEATURE_WEIGHTS)
++
++
++def predict(model, zs):
++    if len(zs) < 3:
++        return None
++    d, _ = model.dist(zs)
++    return cf.decide(d)[0]
++
++
++def metrics(conf):
++    """conf {(true, pred): n} -> (n, acc, balanced acc, {zone: recall}, {zone: n})."""
++    zones = sorted({a for a, _ in conf})
++    n = sum(conf.values())
++    acc = sum(v for (a, b), v in conf.items() if a == b) / max(n, 1)
++    rec, cnt = {}, {}
++    for z in zones:
++        tot = sum(v for (a, _), v in conf.items() if a == z)
++        cnt[z] = tot
++        rec[z] = sum(v for (a, b), v in conf.items() if a == z and b == z) / max(tot, 1)
++    bal = sum(rec.values()) / max(len(rec), 1)
++    return n, acc, bal, rec, cnt
++
++
++def fmt(name, conf):
++    n, acc, bal, rec, cnt = metrics(conf)
++    return "%-34s n=%5d  acc=%.3f  bal=%.3f  recall %s" % (
++        name, n, acc, bal, " ".join("%s=%.2f" % (z, rec[z]) for z in sorted(rec)))
++
++
++def cv_by_day(res, sub=None, model_factory=new_model):
++    """Leave-one-day-out. sub(x) -> bool restricts the scored windows. Returns the confusion Counter."""
++    days = sorted({x["row"]["_day"] for x in res})
++    conf = collections.Counter()
++    for d in days:
++        train = [(x["label"], x["zs"]) for x in res if x["row"]["_day"] != d and x["label"] in cf.ZONES and len(x["zs"]) >= 3
++                 and not x.get("warm")]
++        if len({z for z, _ in train}) < 2:
++            continue
++        m = model_factory().fit(train)
++        for x in res:
++            if x["row"]["_day"] == d and x["label"] in cf.ZONES and not x.get("warm") and (sub is None or sub(x)):
++                p = predict(m, x["zs"])
++                if p:
++                    conf[(x["label"], p)] += 1
++    return conf
++
++
++def ble_conf(res, col, sub=None):
++    conf = collections.Counter()
++    for x in res:
++        if x["label"] in cf.ZONES and x["row"].get(col) in cf.ZONES and not x.get("warm") and (sub is None or sub(x)):
++            conf[(x["label"], x["row"][col])] += 1
++    return conf
++
++
++def static_results(rows):
++    """Baseline-free comparison: one global median/MAD per feature over the whole log."""
++    stat = {}
++    for n in cf.NAMES:
++        v = sorted(cf.g(num(r["csi_" + n])) for r in rows if num(r.get("csi_" + n)) is not None)
++        med = cf.quantile(v, 0.5)
++        stat[n] = (med, max(cf.quantile(sorted(abs(x - med) for x in v), 0.5) * 1.4826, cf.SCALE_FLOOR))
++    buf = collections.deque(maxlen=cf.SMOOTH_N)
++    out = []
++    t0 = rows[0]["_t"]
++    for r in rows:
++        z = {n: (cf.g(v) - stat[n][0]) / stat[n][1] for n, v in raw_of(r).items() if v is not None}
++        buf.append(z)
++        out.append({"row": r, "t": r["_t"], "z": z, "zs": smooth(buf), "label": cf.weak_from_row(r, r["_hour"]),
++                    "warm": r["_t"] < t0 + cf.WINDOW_S})
++    return out
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--logdir", default="/var/lib/zone-log")
++    ap.add_argument("--days", default="")
++    ap.add_argument("--compare", action="store_true", help="also sweep baseline window / quantile and a static normalisation")
++    a = ap.parse_args()
++    rows = load_rows(a.logdir, [d for d in a.days.split(",") if d] or None)
++    if not rows:
++        sys.exit("no zone-v3 rows in " + a.logdir)
++    bl, res = run(rows)
++    days = sorted({r["_day"] for r in rows})
++    labs = collections.Counter(x["label"] for x in res)
++    print("rows %d  days %s  first %s  last %s" % (len(rows), ",".join(days), rows[0]["ts"], rows[-1]["ts"]))
++    print("weak labels:", dict(labs))
++    night = lambda x: x["row"]["_hour"] >= 23 or x["row"]["_hour"] < 7  # noqa: E731
++    print("\n== zones scored against rule weak labels (windows with a z vector of >= 3 features) ==")
++    print(fmt("CSI baseline+classifier, all", cv_by_day(res)))
++    print(fmt("CSI night 23-07", cv_by_day(res, night)))
++    print(fmt("CSI day 07-23", cv_by_day(res, lambda x: not night(x))))
++    print(fmt("BLE fingerprint (fp_zone)", ble_conf(res, "fp_zone")))
++    print(fmt("BLE live zone (optimistic)", ble_conf(res, "zone")))
++    for d in days:
++        sub = lambda x, d=d: x["row"]["_day"] == d  # noqa: E731
++        print(fmt("CSI held-out day " + d, cv_by_day(res, sub)))
++    conf = cv_by_day(res)
++    print("\nconfusion (rows = weak label, cols = CSI):")
++    zs = sorted({a for a, _ in conf} | {b for _, b in conf})
++    print("%-10s" % "" + "".join("%10s" % z for z in zs))
++    for t in zs:
++        print("%-10s" % t + "".join("%10d" % conf.get((t, p), 0) for p in zs))
++    if a.compare:
++        print("\n== variants ==")
++        print(fmt("static global normalisation", cv_by_day(static_results(rows))))
++        for wh in (4, 6, 8, 12, 24):
++            for q in (0.1, 0.2):
++                _, r2 = run(rows, cf.Baseline(window_s=wh * 3600, loc_q=q))
++                print(fmt("baseline window %2dh q=%.1f" % (wh, q), cv_by_day(r2)))
++
++
++if __name__ == "__main__":
++    main()
+--- /dev/null
++++ b/presence-csi/csi_svc.py
+@@ -0,0 +1,445 @@
++"""CSI shadow zoning service (nl-pi): device-free zone estimate from the WiFi CSI summaries, published NEXT TO the live zone.
++It never writes anything the live logic reads: sensor.yui_room_zone, rp_feat_weight_db and the fingerprints are untouched.
++
++  in   presence/<cyd|kitchen|pcdesk|workdesk>/csi   CSI summaries (~3 s)
++       presence/zone/state                          HA context: live zone, BLE fp zone, PC / radar / light evidence (10 s)
++       presence/calibrate/status + /cmd             the existing calibrate buttons: a finished recording also stores CSI samples
++       presence/label/event + labels.db             label-site taps: the CSI of that moment becomes a sample (undo removes it)
++  out  presence/csi/state       retained JSON  {zone, confidence, scores, used_nodes, baseline ..}   -> sensor.rp_csi_zone
++       presence/csi/agreement   retained JSON  {agree_pct, vs live / weak labels / BLE ...}          -> sensor.rp_csi_agreement
++       homeassistant/sensor/rp_csi_{zone,agreement}/config   MQTT discovery (retained), presence/csi/availability (LWT)
++  files (STATE_DIR, default /var/lib/presence-csi): state.json.gz (baseline window + agreement ring + samples + label evals),
++       feat-YYYY-MM-DD.csv (10 s raw + z features for later experiments, 14 days kept)
++
++Windows are 10 s means like the zone log. Features: log1p(value) minus a rolling quiet floor over 8 h, in units of the window's
++robust spread (csi_features.Baseline). A node that reboots loses its history (its firmware 'still' baseline restarts).
++Training data per zone: calibrate-button and label-site samples; until a zone has >= MIN_REAL of them, weak-rule 'seed' windows
++bootstrapped from the zone log stand in (marked in the attributes). Env: MQTT_* (presence-ble.env), CSI_DIR, ZONELOG_DIR,
++LABEL_DB, CSI_SEED=0 to disable the seed fallback.
++"""
++import csv
++import gzip
++import json
++import os
++import sqlite3
++import threading
++import time
++from collections import defaultdict, deque
++
++import csi_features as cf
++import csi_replay as rp
++
++STATE_DIR = os.environ.get("CSI_DIR", "/var/lib/presence-csi")
++ZONELOG_DIR = os.environ.get("ZONELOG_DIR", "/var/lib/zone-log")
++LABEL_DB = os.environ.get("LABEL_DB", "/var/lib/presence-labels/labels.db")
++USE_SEED = os.environ.get("CSI_SEED", "1") != "0"
++PERIOD_S = 10
++SETTLE_S = 5            # same as calibrate.record_zone
++MIN_REAL = 3            # cal/label samples a zone needs before the seed stops standing in for it
++MIN_FEATS = 3           # fewer usable z features than this -> state 'unknown'
++CTX_STALE_S = 90
++RING_LEN = 8640         # 24 h of 10 s windows
++KEEP_DAYS = 14
++SAVE_EVERY_S = 600
++T_STATE, T_AGREE, T_AVAIL = "presence/csi/state", "presence/csi/agreement", "presence/csi/availability"
++EXTRA = ("rssi", "rssi_sd", "mstd")
++
++
++def mean(xs):
++    return sum(xs) / len(xs) if xs else None
++
++
++def rnd(x, nd=2):
++    return None if x is None else round(x, nd)
++
++
++class Engine:
++    """All logic, no MQTT: feed messages in, call tick(now) every PERIOD_S, read the returned payloads."""
++
++    def __init__(self, state_dir=STATE_DIR, label_db=LABEL_DB, use_seed=USE_SEED):
++        self.dir, self.label_db, self.use_seed = state_dir, label_db, use_seed
++        self.lock = threading.RLock()
++        self.msgs = {n: deque() for n in cf.NODES}       # node -> (t, payload)
++        self.last_up, self.boot_epoch, self.reboots = {}, {}, {}
++        self.bl = cf.Baseline()
++        self.zbuf = deque(maxlen=cf.SMOOTH_N)
++        self.samples = []        # {zone, z, src: cal|label, ts, id?}
++        self.seed = []           # {zone, z, src: seed}
++        self.label_evals = []    # {ts, id, label, csi, live, fp}
++        self.ring = deque(maxlen=RING_LEN)   # (t, csi, live, fp, weak)
++        self.ctx, self.ctx_t = {}, 0.0
++        self.cal = {"state": "idle", "zone": None, "t0": 0.0, "z": []}
++        self.model, self.train_info = cf.ZoneModel(weights=cf.FEATURE_WEIGHTS), {}
++        self.cur = {"zone": "unknown", "conf": 0.0}
++        self.agree_cache, self.agree_t = {}, 0.0
++        self.last_save = time.time()
++        self.notes = []
++        os.makedirs(self.dir, exist_ok=True)
++        self._load()
++        self.refit()
++
++    # ------------------------------------------------------------- persistence / bootstrap
++    def _path(self):
++        return os.path.join(self.dir, "state.json.gz")
++
++    def _load(self):
++        p = self._path()
++        if os.path.exists(p):
++            try:
++                with gzip.open(p, "rt", encoding="utf-8") as f:
++                    d = json.load(f)
++                self.bl.load(d.get("baseline", {}))
++                self.samples = d.get("samples", [])
++                self.seed = d.get("seed", [])
++                self.label_evals = d.get("label_evals", [])
++                self.ring.extend(tuple(x) for x in d.get("ring", []))
++                self.boot_epoch = {k: float(v) for k, v in d.get("boot_epoch", {}).items()}
++                self.notes.append("state loaded")
++                return
++            except (OSError, ValueError, KeyError) as e:
++                self.notes.append("state unreadable: %s" % e)
++        self.bootstrap()
++
++    def bootstrap(self):
++        """First start: replay the last days of the zone log through the baseline and cut the seed samples from it."""
++        try:
++            rows = rp.load_rows(ZONELOG_DIR, last_n_days=3)
++        except OSError:
++            rows = []
++        if rows:
++            self.bl, res = rp.run(rows, self.bl)
++            self.bl.refresh(rows[-1]["_t"])
++            self.seed = rp.seed_samples(res)
++            self.notes.append("bootstrapped from %d zone-log rows, %d seed samples" % (len(rows), len(self.seed)))
++
++    def save(self, now=None):
++        d = {"baseline": self.bl.dump(), "samples": self.samples, "seed": self.seed, "label_evals": self.label_evals[-500:],
++             "ring": [list(x) for x in self.ring], "boot_epoch": self.boot_epoch, "saved": int(now or time.time())}
++        tmp = self._path() + ".tmp"
++        with gzip.open(tmp, "wt", encoding="utf-8") as f:
++            json.dump(d, f)
++        os.replace(tmp, self._path())
++        self.last_save = now or time.time()
++
++    # ------------------------------------------------------------- model
++    def refit(self):
++        with self.lock:
++            by = defaultdict(list)
++            for s in self.samples:
++                by[s["zone"]].append(s)
++            train, info = [], {}
++            for zone in cf.ZONES:
++                real = by.get(zone, [])
++                if len(real) >= MIN_REAL:
++                    use, src = real, "cal+label"
++                else:
++                    seeded = [s for s in self.seed if s["zone"] == zone] if self.use_seed else []
++                    use, src = (seeded, "seed") if seeded else (real, "cal+label")
++                if use:
++                    train += [(zone, s["z"]) for s in use]
++                    info[zone] = {"src": src, "n": len(use)}
++            self.model = cf.ZoneModel(weights=cf.FEATURE_WEIGHTS).fit(train) if train else cf.ZoneModel(weights=cf.FEATURE_WEIGHTS)
++            self.train_info = info
++
++    # ------------------------------------------------------------- inputs
++    def on_csi(self, node, p, now):
++        if node not in self.msgs:
++            return
++        with self.lock:
++            up = p.get("up")
++            if up is not None:
++                up = float(up)
++                lu = self.last_up.get(node)
++                boot = now - up
++                known = self.boot_epoch.get(node)
++                if (lu is not None and up < lu - 30) or (known is not None and boot > known + 120):
++                    self.reboots[node] = now
++                    for k in cf.KINDS:
++                        self.bl.reset("%s_%s" % (node, k))
++                    self.notes.append("%s rebooted: baseline reset" % node)
++                self.last_up[node] = up
++                self.boot_epoch[node] = boot if known is None or boot > known + 120 else known
++            if int(p.get("ok", 0)) == 1 and p.get("motion") is not None:
++                q = self.msgs[node]
++                q.append((now, p))
++                while q and q[0][0] < now - 3 * PERIOD_S:
++                    q.popleft()
++
++    def on_ctx(self, p, now):
++        with self.lock:
++            self.ctx, self.ctx_t = p, now
++
++    def on_cal_status(self, p, now):
++        """Existing calibrate service status: capture z windows while it records, keep them only if it finishes 'done'."""
++        with self.lock:
++            st, zone = p.get("state"), p.get("zone")
++            c = self.cal
++            if st == "recording":
++                if c["state"] != "recording" or c["zone"] != zone:
++                    self.cal = {"state": "recording", "zone": zone, "t0": now, "z": []}
++            elif st == "done" and c["state"] == "recording" and c["zone"] == zone:
++                if zone in cf.ZONES and len(c["z"]) >= 3:
++                    self.samples = [s for s in self.samples if not (s["src"] == "cal" and s["zone"] == zone)]
++                    self.samples += [{"zone": zone, "z": z, "ts": int(t), "src": "cal"} for t, z in c["z"]]
++                    self.notes.append("cal %s: %d samples" % (zone, len(c["z"])))
++                    self.refit()
++                self.cal = {"state": "idle", "zone": None, "t0": 0.0, "z": []}
++            elif st in ("idle", "error", "offline") and c["state"] == "recording":
++                self.cal = {"state": "idle", "zone": None, "t0": 0.0, "z": []}
++
++    def on_cal_cmd(self, p):
++        if p.get("action") == "clear" and p.get("zone") in cf.ZONES:
++            with self.lock:
++                self.samples = [s for s in self.samples if not (s["src"] == "cal" and s["zone"] == p["zone"])]
++                self.refit()
++
++    def ingest_label(self, lid, now):
++        """label-site tap: its per-node 15 s CSI means become one sample (z against the current baseline)."""
++        try:
++            c = sqlite3.connect("file:%s?mode=ro" % self.label_db, uri=True, timeout=5)
++            lab = c.execute("SELECT zone, ts FROM labels WHERE id=?", (lid,)).fetchone()
++            rows = c.execute("SELECT node, csi_motion, csi_still FROM samples WHERE label_id=?", (lid,)).fetchall()
++            c.close()
++        except sqlite3.Error:
++            return False
++        if not lab or lab[0] not in cf.ZONES:
++            return False
++        raw = {}
++        for node, m, s in rows:
++            if node in cf.NODES:
++                raw["%s_motion" % node] = m
++                raw["%s_still" % node] = s if s is not None and s >= 0 else None
++        with self.lock:
++            z = self.bl.zvec(raw)
++            if len(z) < MIN_FEATS:
++                return False
++            self.label_evals.append({"ts": int(lab[1]), "id": lid, "label": lab[0], "csi": self.cur["zone"],
++                                     "live": self.ctx.get("zone") if now - self.ctx_t < CTX_STALE_S else None,
++                                     "fp": self.ctx.get("fp") if now - self.ctx_t < CTX_STALE_S else None})
++            self.samples.append({"zone": lab[0], "z": {k: round(v, 3) for k, v in z.items()}, "ts": int(lab[1]), "src": "label",
++                                 "id": lid})
++            self.refit()
++        return True
++
++    def sync_labels(self):
++        """Drop label samples whose label was undone in label-site."""
++        try:
++            c = sqlite3.connect("file:%s?mode=ro" % self.label_db, uri=True, timeout=5)
++            ids = {r[0] for r in c.execute("SELECT id FROM labels")}
++            c.close()
++        except sqlite3.Error:
++            return
++        with self.lock:
++            keep = [s for s in self.samples if s["src"] != "label" or s.get("id") in ids]
++            if len(keep) != len(self.samples):
++                self.samples = keep
++                self.label_evals = [e for e in self.label_evals if e["id"] in ids]
++                self.refit()
++
++    # ------------------------------------------------------------- the 10 s step
++    def window(self, now):
++        raw, extra = {}, {}
++        for node in cf.NODES:
++            ps = [p for t, p in self.msgs[node] if t > now - PERIOD_S]
++            m = [float(p["motion"]) for p in ps]
++            s = [float(p["still"]) for p in ps if p.get("still") is not None and float(p["still"]) >= 0]
++            raw[node + "_motion"] = mean(m)
++            raw[node + "_still"] = mean(s)
++            for k in EXTRA:
++                extra["%s_%s" % (node, k)] = mean([float(p[k]) for p in ps if p.get(k) is not None])
++            gs = [p["gstd"] for p in ps if isinstance(p.get("gstd"), list) and len(p["gstd"]) == 8]
++            for i in range(8):
++                extra["%s_g%d" % (node, i)] = mean([g[i] for g in gs])
++        return raw, extra
++
++    def tick(self, now):
++        """-> (state_payload, agreement_payload, feature_row)."""
++        with self.lock:
++            raw, extra = self.window(now)
++            self.bl.tick(now)
++            z = self.bl.zvec(raw)
++            for n, v in raw.items():
++                self.bl.add(now, n, v)
++            self.zbuf.append(z)
++            zs = rp.smooth(self.zbuf)
++            if self.cal["state"] == "recording" and now - self.cal["t0"] >= SETTLE_S and len(z) >= MIN_FEATS:
++                self.cal["z"].append((now, {k: round(v, 3) for k, v in z.items()}))
++            dists, used = ({}, [])
++            zone, conf = "unknown", 0.0
++            if len(self.model.mu) >= 2 and len(zs) >= MIN_FEATS:
++                dists, used = self.model.dist(zs)
++                best, conf = cf.decide(dists)
++                if best and len(used) >= MIN_FEATS:
++                    zone = best
++            fresh = now - self.ctx_t < CTX_STALE_S
++            live = self.ctx.get("zone") if fresh else None
++            fp = self.ctx.get("fp") if fresh else None
++            weak = cf.weak_from_ctx(self.ctx, now) if fresh else None
++            self.cur = {"zone": zone, "conf": conf}
++            self.ring.append((int(now), zone, live, fp, weak))
++            if now - self.agree_t >= 60:
++                self.agree_cache, self.agree_t = self.agreement(now), now
++            used_nodes = sorted({u.rsplit("_", 1)[0] for u in used if u.endswith("_still")})
++            info = self.bl.info(now)
++            ages = [v["quiet_age_min"] for k, v in info.items() if k.endswith("_still") and v["quiet_age_min"] is not None]
++            state = {"zone": zone, "confidence": conf, "scores": {k: rnd(v, 3) for k, v in sorted(dists.items())},
++                     "used_nodes": used_nodes, "n_features": len(used), "live_zone": live, "fp_zone": fp, "weak_label": weak,
++                     "z_still": {k.rsplit("_", 1)[0]: rnd(v, 2) for k, v in zs.items() if k.endswith("_still")},
++                     "baseline": {k.rsplit("_", 1)[0]: v for k, v in info.items() if k.endswith("_still")},
++                     "baseline_span_h": max([v["span_h"] for k, v in info.items() if k.endswith("_still")], default=0),
++                     "baseline_quiet_age_min": min(ages) if ages else None,
++                     "baseline_nodes": sorted(k.rsplit("_", 1)[0] for k in info if k.endswith("_still")),
++                     "training": self.train_info, "calibrating": self.cal["zone"] if self.cal["state"] == "recording" else None,
++                     "reboots": {n: int(t) for n, t in self.reboots.items()}, "ts": int(now)}
++            row = [time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now)), zone, conf, live or "", fp or "", weak or ""]
++            for node in cf.NODES:
++                row += [rnd(raw[node + "_motion"], 1), rnd(raw[node + "_still"], 1)]
++                row += [rnd(extra["%s_%s" % (node, k)], 1) for k in EXTRA]
++                row += [rnd(extra["%s_g%d" % (node, i)], 1) for i in range(8)]
++            row += [rnd(z.get(n), 2) for n in cf.NAMES]
++            return state, dict(self.agree_cache), row
++
++    # ------------------------------------------------------------- agreement
++    def agreement(self, now):
++        def acc(pairs):
++            return (sum(1 for a, b in pairs if a == b) / len(pairs)) if pairs else None
++
++        def bal(pairs):
++            by = defaultdict(list)
++            for truth, pred in pairs:
++                by[truth].append(truth == pred)
++            rec = [sum(v) / len(v) for v in by.values() if len(v) >= 5]
++            return (sum(rec) / len(rec)) if rec else None
++
++        out = {}
++        for tag, h in (("1h", 3600), ("24h", 86400)):
++            recs = [r for r in self.ring if r[0] >= now - h]
++            live = [(r[1], r[2]) for r in recs if r[1] in cf.ZONES and r[2] in cf.ZONES]
++            fpp = [(r[1], r[3]) for r in recs if r[1] in cf.ZONES and r[3] in cf.ZONES]
++            weak = [r for r in recs if r[4] in cf.ZONES]
++            wc = [(r[4], r[1]) for r in weak if r[1] in cf.ZONES]
++            wb_fp = [(r[4], r[3]) for r in weak if r[3] in cf.ZONES and r[1] in cf.ZONES]
++            wb_live = [(r[4], r[2]) for r in weak if r[2] in cf.ZONES and r[1] in cf.ZONES]
++            out["vs_live_" + tag] = rnd(acc(live), 3)
++            out["n_live_" + tag] = len(live)
++            out["vs_fp_" + tag] = rnd(acc(fpp), 3)
++            out["weak_acc_" + tag] = rnd(acc(wc), 3)
++            out["weak_bal_" + tag] = rnd(bal(wc), 3)
++            out["n_weak_" + tag] = len(wc)
++            out["ble_fp_weak_bal_" + tag] = rnd(bal(wb_fp), 3)
++            out["ble_fp_weak_acc_" + tag] = rnd(acc(wb_fp), 3)
++            out["live_weak_bal_" + tag] = rnd(bal(wb_live), 3)   # shares evidence with the rules: optimistic
++        ev = [e for e in self.label_evals if e["ts"] >= now - 7 * 86400]
++        out["labels_7d"] = len(ev)
++        out["csi_vs_labels_7d"] = rnd(acc([(e["label"], e["csi"]) for e in ev]), 3)
++        out["live_vs_labels_7d"] = rnd(acc([(e["label"], e["live"]) for e in ev if e["live"]]), 3)
++        out["fp_vs_labels_7d"] = rnd(acc([(e["label"], e["fp"]) for e in ev if e["fp"]]), 3)
++        base = out.get("weak_bal_24h")
++        out["agree_pct"] = None if base is None else round(100 * base, 1)
++        out["ts"] = int(now)
++        return out
++
++
++# ------------------------------------------------------------------ feature log
++def feat_head():
++    h = ["ts", "csi_zone", "csi_conf", "live", "fp", "weak"]
++    for n in cf.NODES:
++        h += ["%s_motion" % n, "%s_still" % n] + ["%s_%s" % (n, k) for k in EXTRA] + ["%s_g%d" % (n, i) for i in range(8)]
++    return h + ["z_" + n for n in cf.NAMES]
++
++
++def append_feat(dirpath, row, now):
++    path = os.path.join(dirpath, "feat-%s.csv" % time.strftime("%Y-%m-%d", time.localtime(now)))
++    new = not os.path.exists(path)
++    with open(path, "a", newline="", encoding="utf-8") as f:
++        w = csv.writer(f)
++        if new:
++            w.writerow(feat_head())
++            cutoff = now - KEEP_DAYS * 86400
++            for fn in os.listdir(dirpath):
++                fp = os.path.join(dirpath, fn)
++                if fn.startswith("feat-") and fn.endswith(".csv") and os.path.getmtime(fp) < cutoff:
++                    os.remove(fp)
++        w.writerow(row)
++
++
++# ------------------------------------------------------------------ MQTT wrapper
++DISCOVERY = {
++    "rp_csi_zone": {"name": "RP csi zone", "unique_id": "rp_csi_zone", "state_topic": T_STATE,
++                    "value_template": "{{ value_json.zone }}", "json_attributes_topic": T_STATE, "icon": "mdi:wifi-marker",
++                    "expire_after": 90},
++    "rp_csi_label": {"name": "RP csi label", "unique_id": "rp_csi_label", "state_topic": T_STATE,
++                     "value_template": "{{ value_json.zone }} \u00b7 {{ (value_json.confidence * 100) | round(0) | int }}%",
++                     "icon": "mdi:wifi-marker", "expire_after": 90},
++    "rp_csi_agreement": {"name": "RP csi agreement", "unique_id": "rp_csi_agreement", "state_topic": T_AGREE,
++                         "value_template": "{{ value_json.agree_pct }}", "json_attributes_topic": T_AGREE,
++                         "unit_of_measurement": "%", "icon": "mdi:check-decagram", "expire_after": 300},
++}
++
++
++def run_mqtt():
++    import paho.mqtt.client as mqtt
++    eng = Engine()
++    c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id="csi_shadow") if hasattr(mqtt, "CallbackAPIVersion") \
++        else mqtt.Client(client_id="csi_shadow")
++    c.username_pw_set(os.environ["MQTT_USER"], os.environ["MQTT_PASS"])
++    c.will_set(T_AVAIL, "offline", qos=1, retain=True)
++
++    def on_connect(cl, u, f, rc):
++        for t in ("presence/+/csi", "presence/zone/state", "presence/calibrate/status", "presence/calibrate/cmd",
++                  "presence/label/event"):
++            cl.subscribe(t, qos=1)
++        for oid, cfg in DISCOVERY.items():
++            body = dict(cfg, availability_topic=T_AVAIL)   # no device block: the entity_id must stay sensor.rp_csi_*
++            cl.publish("homeassistant/sensor/%s/config" % oid, json.dumps(body), qos=1, retain=True)
++        cl.publish(T_AVAIL, "online", qos=1, retain=True)
++
++    def on_message(cl, u, m):
++        now = time.time()
++        try:
++            p = json.loads(m.payload)
++            parts = m.topic.split("/")
++            if m.topic == "presence/zone/state":
++                eng.on_ctx(p, now)
++            elif m.topic == "presence/calibrate/status":
++                eng.on_cal_status(p, now)
++            elif m.topic == "presence/calibrate/cmd":
++                eng.on_cal_cmd(p)
++            elif m.topic == "presence/label/event":
++                threading.Timer(2.0, eng.ingest_label, args=(int(p["id"]), now)).start()
++            elif len(parts) == 3 and parts[2] == "csi":
++                eng.on_csi(parts[1], p, now)
++        except (ValueError, TypeError, KeyError, AttributeError):
++            pass
++
++    c.on_connect, c.on_message = on_connect, on_message
++    c.connect(os.environ.get("MQTT_HOST", "127.0.0.1"), int(os.environ.get("MQTT_PORT", "1883")), 60)
++    c.loop_start()
++    last_sync = 0.0
++    try:
++        while True:
++            now = time.time()
++            time.sleep(max(0.5, PERIOD_S - (now % PERIOD_S)))
++            now = time.time()
++            state, agree, row = eng.tick(now)
++            c.publish(T_STATE, json.dumps(state), qos=0, retain=True)
++            c.publish(T_AGREE, json.dumps(agree), qos=0, retain=True)
++            try:
++                append_feat(STATE_DIR, row, now)
++            except OSError:
++                pass
++            if now - last_sync > 60:
++                eng.sync_labels()
++                last_sync = now
++            if now - eng.last_save > SAVE_EVERY_S:
++                eng.save(now)
++    finally:
++        try:
++            eng.save()
++        except OSError:
++            pass
++        c.publish(T_AVAIL, "offline", qos=1, retain=True)
++
++
++if __name__ == "__main__":
++    run_mqtt()
+--- /dev/null
++++ b/presence-csi/csi_score.py
+@@ -0,0 +1,70 @@
++"""Score the shadow CSI zone against the BLE fingerprint and the live zone, from the zone log (csi_zone / csi_conf columns).
++
++  python3 csi_score.py [--logdir /var/lib/zone-log] [--days 2026-10-30,2026-10-31] [--min-conf 0.0]
++
++Per day and overall: CSI vs rule weak labels (csi_features.weak_label, NOT ground truth: pc_desk / kitchen / work_desk / bed
++evidence from PC, radar, lights, clock), the same windows scored for BLE fp_zone and the live zone (the live zone shares evidence with
++the rules, so it is optimistic), and plain agreement csi_zone == zone / fp_zone. Rows without a csi_zone (service down, or files
++written before the column existed) are skipped. Stdlib only.
++"""
++import argparse
++import collections
++import os
++import sys
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++import csi_features as cf  # noqa: E402
++import csi_replay as rp  # noqa: E402
++
++
++def score(rows, min_conf=0.0):
++    """-> {day or 'ALL': {name: Counter((true, pred))}} plus agreement counters."""
++    out = collections.defaultdict(lambda: collections.defaultdict(collections.Counter))
++    for r in rows:
++        cz = r.get("csi_zone") or ""
++        if cz not in cf.ZONES:
++            continue
++        conf = rp.num(r.get("csi_conf")) or 0.0
++        if conf < min_conf:
++            continue
++        weak = cf.weak_from_row(r, r["_hour"])
++        for key in (r["_day"], "ALL"):
++            o = out[key]
++            o["n_scored"][("rows", "rows")] += 1
++            for other, col in (("live", "zone"), ("fp", "fp_zone")):
++                v = r.get(col)
++                if v in cf.ZONES:
++                    o["agree_" + other][(v, cz)] += 1
++            if weak in cf.ZONES:
++                o["csi_vs_weak"][(weak, cz)] += 1
++                for other, col in (("ble_fp", "fp_zone"), ("live", "zone")):
++                    v = r.get(col)
++                    if v in cf.ZONES:
++                        o[other + "_vs_weak_same_rows"][(weak, v)] += 1
++    return out
++
++
++def main(argv=None):
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--logdir", default=os.environ.get("ZONELOG_DIR", "/var/lib/zone-log"))
++    ap.add_argument("--days", default="")
++    ap.add_argument("--min-conf", type=float, default=0.0)
++    a = ap.parse_args(argv)
++    rows = rp.load_rows(a.logdir, days=[d for d in a.days.split(",") if d] or None)
++    sc = score(rows, a.min_conf)
++    if not sc:
++        print("no rows with a csi_zone yet in", a.logdir)
++        return 1
++    for key in sorted(sc, key=lambda k: (k == "ALL", k)):
++        o = sc[key]
++        print("== %s: %d scored windows" % (key, sum(o["n_scored"].values())))
++        for name in ("csi_vs_weak", "ble_fp_vs_weak_same_rows", "live_vs_weak_same_rows", "agree_live", "agree_fp"):
++            if o.get(name):
++                label = {"agree_live": "csi == live zone (true=live)", "agree_fp": "csi == BLE fp (true=fp)"}.get(name, name)
++                print(rp.fmt(label, o[name]))
++    print("weak labels are rule-based (no CSI), not ground truth; 'live' shares evidence with them.")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+--- /dev/null
++++ b/presence-csi/test_csi.py
+@@ -0,0 +1,403 @@
++"""Unit tests for csi_features and csi_svc.Engine (stdlib unittest, no MQTT). Run: python3 -m unittest test_csi -v"""
++import json
++import os
++import random
++import sqlite3
++import tempfile
++import unittest
++
++import csi_features as cf
++import csi_svc as svc
++
++T0 = 1_800_000_000.0   # fixed fake epoch
++
++
++def quiet_raw(rng, lvl=20.0):
++    return {n: max(0.0, rng.gauss(lvl, 2.0)) for n in cf.NAMES}
++
++
++class BaselineTests(unittest.TestCase):
++    def feed(self, bl, n, fn, t0=T0):
++        rng = random.Random(1)
++        for i in range(n):
++            t = t0 + 10 * i
++            bl.tick(t)
++            for name, v in fn(rng, i).items():
++                bl.add(t, name, v)
++        return t0 + 10 * n
++
++    def test_no_reference_before_min_n(self):
++        bl = cf.Baseline()
++        self.feed(bl, cf.MIN_N - 10, lambda r, i: {"cyd_still": 20 + r.random()})
++        bl.refresh(T0 + 10 * cf.MIN_N)
++        self.assertIsNone(bl.z("cyd_still", 50))
++
++    def test_quiet_is_near_zero_and_activity_positive(self):
++        bl = cf.Baseline()
++        t = self.feed(bl, 1000, lambda r, i: {"cyd_still": max(0.0, r.gauss(20, 2))})
++        bl.refresh(t)
++        self.assertLess(abs(bl.z("cyd_still", 18)), 3.0)
++        self.assertGreater(bl.z("cyd_still", 200), 4.0)
++        self.assertLessEqual(bl.z("cyd_still", 1e9), cf.Z_CLIP[1])
++        self.assertIsNone(bl.z("cyd_still", None))
++        self.assertIsNone(bl.z("unknown_name", 5))
++
++    def test_scale_floor(self):
++        bl = cf.Baseline()
++        t = self.feed(bl, 500, lambda r, i: {"cyd_still": 20.0})
++        bl.refresh(t)
++        self.assertGreaterEqual(bl.ref["cyd_still"]["scale"], cf.SCALE_FLOOR)
++
++    def test_follows_drift(self):
++        """After the level doubles for longer than the window, the same raw value is no longer 'high'."""
++        bl = cf.Baseline(window_s=3600)
++        t = self.feed(bl, 400, lambda r, i: {"pcdesk_still": max(0.0, r.gauss(20, 2))})
++        bl.refresh(t)
++        z_before = bl.z("pcdesk_still", 40)
++        t = self.feed(bl, 700, lambda r, i: {"pcdesk_still": max(0.0, r.gauss(40, 4))}, t0=t)
++        bl.refresh(t)
++        self.assertGreater(z_before, 3.0)
++        self.assertLess(bl.z("pcdesk_still", 40), 2.0)
++
++    def test_reset_and_none(self):
++        bl = cf.Baseline()
++        t = self.feed(bl, 500, lambda r, i: {"cyd_still": 20 + r.random()})
++        bl.refresh(t)
++        self.assertIn("cyd_still", bl.ref)
++        bl.add(t, "cyd_still", None)   # ignored
++        bl.reset("cyd_still")
++        self.assertNotIn("cyd_still", bl.ref)
++        self.assertNotIn("cyd_still", bl.pts)
++
++    def test_dump_load_roundtrip(self):
++        bl = cf.Baseline()
++        t = self.feed(bl, 500, lambda r, i: {"cyd_still": 20 + r.random() * 3})
++        bl.refresh(t)
++        d = json.loads(json.dumps(bl.dump()))
++        b2 = cf.Baseline()
++        b2.load(d)
++        self.assertAlmostEqual(b2.ref["cyd_still"]["loc"], bl.ref["cyd_still"]["loc"], places=2)
++        self.assertAlmostEqual(b2.z("cyd_still", 40), bl.z("cyd_still", 40), places=1)
++
++    def test_info(self):
++        bl = cf.Baseline()
++        t = self.feed(bl, 500, lambda r, i: {"cyd_still": 20 + r.random() * 3})
++        bl.refresh(t)
++        inf = bl.info(t)["cyd_still"]
++        self.assertIn("span_h", inf)
++        self.assertIsNotNone(inf["quiet_age_min"])
++
++
++class ModelTests(unittest.TestCase):
++    def setUp(self):
++        rng = random.Random(3)
++        self.samples = []
++        cent = {"kitchen": {"cyd_still": 6, "pcdesk_still": 0, "workdesk_still": 0},
++                "pc_desk": {"cyd_still": 0, "pcdesk_still": 7, "workdesk_still": 1},
++                "bed": {"cyd_still": 0, "pcdesk_still": 0, "workdesk_still": 0}}
++        for zone, c in cent.items():
++            for _ in range(30):
++                self.samples.append((zone, {k: v + rng.gauss(0, 0.5) for k, v in c.items()}))
++        self.cent = cent
++
++    def test_classifies_centroids(self):
++        m = cf.ZoneModel().fit(self.samples)
++        for zone, c in self.cent.items():
++            d, used = m.dist(dict(c))
++            self.assertEqual(cf.decide(d)[0], zone)
++            self.assertEqual(len(used), 3)
++
++    def test_missing_features_still_work(self):
++        m = cf.ZoneModel().fit(self.samples)
++        d, used = m.dist({"pcdesk_still": 7.0})
++        self.assertEqual(used, ["pcdesk_still"])
++        self.assertEqual(cf.decide(d)[0], "pc_desk")
++
++    def test_sd_floor_and_weights(self):
++        m = cf.ZoneModel(sd_floor=1.0).fit([("a", {"x": 1.0}), ("a", {"x": 1.0}), ("b", {"x": 3.0})])
++        self.assertEqual(m.sd["x"], 1.0)
++        mw = cf.ZoneModel(weights={"y": 0.0}).fit([("a", {"x": 0.0, "y": 0.0}), ("b", {"x": 5.0, "y": 0.0})])
++        d, _ = mw.dist({"x": 0.0, "y": 100.0})
++        self.assertEqual(cf.decide(d)[0], "a")   # zero weight: y is ignored
++
++    def test_decide(self):
++        self.assertEqual(cf.decide({}), (None, 0.0))
++        self.assertEqual(cf.decide({"a": 1.0}), ("a", 0.0))
++        z, c = cf.decide({"a": 1.0, "b": 2.0})
++        self.assertEqual(z, "a")
++        self.assertAlmostEqual(c, 0.5)
++        self.assertEqual(cf.decide({"a": 1.0, "b": 1.0})[1], 0.0)
++
++
++class WeakLabelTests(unittest.TestCase):
++    base = dict(home=True, pc_online=True, pc_locked=True, pc_idle=5000.0, radar=False, radar_cm=None, wd_light=False,
++                wd_age_s=None, kitchen_light=False, hour=14)
++
++    def lab(self, **kw):
++        return cf.weak_label(dict(self.base, **kw))
++
++    def test_rules(self):
++        self.assertEqual(self.lab(home=False), "away")
++        self.assertEqual(self.lab(pc_locked=False, pc_idle=10.0), "pc_desk")
++        self.assertIsNone(self.lab(pc_locked=False, pc_idle=600.0))
++        self.assertEqual(self.lab(radar=True, radar_cm=100.0), "kitchen")
++        self.assertIsNone(self.lab(radar=True, radar_cm=400.0))
++        self.assertEqual(self.lab(wd_light=True, wd_age_s=300.0), "work_desk")
++        self.assertIsNone(self.lab(wd_light=True, wd_age_s=3000.0))
++        self.assertEqual(self.lab(hour=2), "bed")
++        self.assertIsNone(self.lab(hour=14))
++        self.assertIsNone(self.lab(hour=2, kitchen_light=True))
++        self.assertIsNone(self.lab(hour=2, radar=True, radar_cm=400.0))
++
++    def test_unavailable_pc(self):
++        """PC offline ('unavailable' strings in the context): night -> bed."""
++        p = {"home": "on", "pc_online": "off", "pc_idle": "unavailable", "pc_locked": "unavailable", "radar": "off",
++             "radar_cm": "111.0", "wd_light": "off", "wd_light_ts": 1.0, "kitchen_light": "off"}
++        import time
++        t = time.mktime(time.strptime("2026-10-30 02:00:00", "%Y-%m-%d %H:%M:%S"))
++        self.assertEqual(cf.weak_from_ctx(p, t), "bed")
++        t = time.mktime(time.strptime("2026-10-30 14:00:00", "%Y-%m-%d %H:%M:%S"))
++        self.assertIsNone(cf.weak_from_ctx(p, t))
++        self.assertEqual(cf.weak_from_ctx(dict(p, home="off"), t), "away")
++
++    def test_from_row(self):
++        r = {"home": "on", "pc_online": "on", "pc_locked": "off", "pc_idle": "3", "radar": "off", "radar_cm": "",
++             "wd_light": "off", "wd_light_age_s": "", "kitchen_light": "off"}
++        self.assertEqual(cf.weak_from_row(r, 12), "pc_desk")
++
++
++# ---------------------------------------------------------------- Engine
++LEVEL = {  # per-zone mean of the 'still' per-mille on each node (quiet = 20)
++    "quiet": {"cyd": 20, "kitchen": 20, "pcdesk": 20, "workdesk": 20},
++    "kitchen": {"cyd": 60, "kitchen": 120, "pcdesk": 20, "workdesk": 20},
++    "pc_desk": {"cyd": 20, "kitchen": 20, "pcdesk": 130, "workdesk": 45},
++    "work_desk": {"cyd": 20, "kitchen": 20, "pcdesk": 45, "workdesk": 130},
++}
++
++
++class Sim:
++    def __init__(self, eng):
++        self.eng, self.t, self.rng = eng, T0, random.Random(7)
++        self.up = {n: 1000.0 for n in cf.NODES}
++
++    def run(self, seconds, scene="quiet", ctx=None):
++        out = None
++        end = self.t + seconds
++        while self.t < end:
++            self.t += 1.0
++            for n in cf.NODES:
++                self.up[n] += 1
++            if int(self.t - T0) % 3 == 0:
++                for n in cf.NODES:
++                    lvl = LEVEL[scene][n]
++                    self.eng.on_csi(n, {"ok": 1, "motion": max(0, self.rng.gauss(lvl, lvl * 0.1)),
++                                        "still": max(0, self.rng.gauss(lvl, lvl * 0.1)), "up": self.up[n]}, self.t)
++            if ctx is not None and int(self.t - T0) % 10 == 0:
++                self.eng.on_ctx(ctx, self.t)
++            if int(self.t - T0) % 10 == 0:
++                out = self.eng.tick(self.t)
++        return out
++
++
++def mkeng(tmp, use_seed=False, label_db=None):
++    return svc.Engine(state_dir=tmp, label_db=label_db or os.path.join(tmp, "none.db"), use_seed=use_seed)
++
++
++class EngineTests(unittest.TestCase):
++    def setUp(self):
++        self._td = tempfile.TemporaryDirectory()
++        self.tmp = self._td.name
++        svc.ZONELOG_DIR = os.path.join(self.tmp, "no-zone-log")   # keep bootstrap away from the real log
++
++    def tearDown(self):
++        self._td.cleanup()
++
++    def calibrate(self, sim, zone, scene, seconds=70):
++        sim.eng.on_cal_status({"state": "recording", "zone": zone}, sim.t)
++        sim.run(seconds, scene)
++        sim.eng.on_cal_status({"state": "done", "zone": zone}, sim.t)
++
++    def test_unknown_before_baseline_and_json_safe(self):
++        eng = mkeng(self.tmp)
++        sim = Sim(eng)
++        state, agree, row = sim.run(60)
++        self.assertEqual(state["zone"], "unknown")
++        json.dumps(state)
++        json.dumps(agree)
++        self.assertEqual(len(row), len(svc.feat_head()))
++
++    def test_calibrate_then_classify(self):
++        eng = mkeng(self.tmp)
++        sim = Sim(eng)
++        sim.run(3900)   # > MIN_N windows of quiet -> baselines exist
++        for zone, scene in (("kitchen", "kitchen"), ("pc_desk", "pc_desk"), ("work_desk", "work_desk"), ("bed", "quiet")):
++            self.calibrate(sim, zone, scene)
++            sim.run(60, "quiet")
++        self.assertEqual({s["zone"] for s in eng.samples}, {"kitchen", "pc_desk", "work_desk", "bed"})
++        self.assertTrue(all(s["src"] == "cal" for s in eng.samples))
++        for scene, want in (("kitchen", "kitchen"), ("pc_desk", "pc_desk"), ("work_desk", "work_desk"), ("quiet", "bed")):
++            state, _, _ = sim.run(120, scene)
++            self.assertEqual(state["zone"], want, (scene, state["scores"]))
++            self.assertGreater(state["confidence"], 0.2)
++            self.assertGreaterEqual(len(state["used_nodes"]), 3)
++        self.assertEqual(state["baseline_nodes"], sorted(cf.NODES))
++        self.assertIsNotNone(state["baseline_quiet_age_min"])
++
++    def test_cal_aborted_keeps_old_samples(self):
++        eng = mkeng(self.tmp)
++        sim = Sim(eng)
++        sim.run(3900)
++        self.calibrate(sim, "kitchen", "kitchen")
++        n = len(eng.samples)
++        eng.on_cal_status({"state": "recording", "zone": "kitchen"}, sim.t)
++        sim.run(30, "kitchen")
++        eng.on_cal_status({"state": "idle", "zone": None}, sim.t)
++        self.assertEqual(len(eng.samples), n)
++        eng.on_cal_cmd({"action": "clear", "zone": "kitchen"})
++        self.assertEqual(len(eng.samples), 0)
++
++    def test_persistence_roundtrip(self):
++        eng = mkeng(self.tmp)
++        sim = Sim(eng)
++        sim.run(3900)
++        self.calibrate(sim, "kitchen", "kitchen")
++        eng.save(sim.t)
++        e2 = mkeng(self.tmp)
++        self.assertEqual(len(e2.samples), len(eng.samples))
++        self.assertEqual(sorted(e2.bl.ref), sorted(eng.bl.ref))
++        self.assertIn("kitchen", e2.model.mu)
++        self.assertEqual(len(e2.ring), len(eng.ring))
++
++    def test_node_reboot_resets_baseline(self):
++        eng = mkeng(self.tmp)
++        sim = Sim(eng)
++        sim.run(3900)
++        self.assertIn("cyd_still", eng.bl.ref)
++        sim.up["cyd"] = 5.0
++        sim.run(10)
++        self.assertNotIn("cyd_still", eng.bl.ref)
++        self.assertIn("kitchen_still", eng.bl.ref)
++        self.assertIn("cyd", eng.reboots)
++        state, _, _ = sim.run(10)
++        self.assertNotIn("cyd", state["baseline_nodes"])
++
++    def test_label_ingest_and_undo(self):
++        db = os.path.join(self.tmp, "labels.db")
++        c = sqlite3.connect(db)
++        c.execute("CREATE TABLE labels(id INTEGER PRIMARY KEY, ts INTEGER, zone TEXT, window_s INTEGER)")
++        c.execute("CREATE TABLE samples(label_id INTEGER, node TEXT, phone_avg REAL, phone_n INTEGER, watch_avg REAL, "
++                  "watch_n INTEGER, mov_best REAL, msgs INTEGER, csi_motion REAL, csi_still REAL, csi_n INTEGER)")
++        c.execute("INSERT INTO labels VALUES(1, ?, 'kitchen', 15)", (int(T0 + 4000),))
++        for node, m, s in (("cyd", 60, 60), ("kitchen", 120, 120), ("pcdesk", 20, -1), ("workdesk", 20, 20)):
++            c.execute("INSERT INTO samples VALUES(1, ?, 0, 0, 0, 0, 0, 0, ?, ?, 5)", (node, m, s))
++        c.execute("INSERT INTO labels VALUES(2, ?, 'attic', 15)", (int(T0 + 4000),))   # unknown zone
++        c.commit()
++        c.close()
++        eng = mkeng(self.tmp, label_db=db)
++        sim = Sim(eng)
++        sim.run(3900, ctx={"zone": "work_desk", "fp": "bed", "home": "on"})
++        self.assertTrue(eng.ingest_label(1, sim.t))
++        self.assertFalse(eng.ingest_label(2, sim.t))
++        self.assertFalse(eng.ingest_label(99, sim.t))
++        self.assertEqual([s["src"] for s in eng.samples], ["label"])
++        self.assertEqual(eng.label_evals[0]["live"], "work_desk")
++        self.assertEqual(eng.label_evals[0]["fp"], "bed")
++        c = sqlite3.connect(db)
++        c.execute("DELETE FROM labels WHERE id=1")
++        c.commit()
++        c.close()
++        eng.sync_labels()
++        self.assertEqual(eng.samples, [])
++        self.assertEqual(eng.label_evals, [])
++
++    def test_seed_stands_in_until_min_real(self):
++        eng = mkeng(self.tmp, use_seed=True)
++        eng.seed = [{"zone": "kitchen", "z": {"cyd_still": 5.0, "kitchen_still": 5.0, "pcdesk_still": 0.0}, "ts": 1, "src": "seed"},
++                    {"zone": "bed", "z": {"cyd_still": 0.0, "kitchen_still": 0.0, "pcdesk_still": 0.0}, "ts": 1, "src": "seed"}]
++        eng.refit()
++        self.assertEqual(eng.train_info["kitchen"]["src"], "seed")
++        eng.samples = [{"zone": "kitchen", "z": {"cyd_still": 6.0}, "ts": i, "src": "cal"} for i in range(svc.MIN_REAL)]
++        eng.refit()
++        self.assertEqual(eng.train_info["kitchen"]["src"], "cal+label")
++        self.assertEqual(eng.train_info["bed"]["src"], "seed")
++
++    def test_agreement_counts(self):
++        eng = mkeng(self.tmp)
++        now = T0 + 100000
++        for i in range(100):
++            eng.ring.append((now - i * 10, "kitchen", "kitchen", "bed", "kitchen"))
++        for i in range(100, 200):
++            eng.ring.append((now - i * 10, "bed", "bed", "bed", "bed"))
++        a = eng.agreement(now)
++        self.assertEqual(a["weak_acc_1h"], 1.0)
++        self.assertEqual(a["vs_live_1h"], 1.0)
++        self.assertEqual(a["ble_fp_weak_acc_1h"], 0.5)
++        self.assertEqual(a["agree_pct"], 100.0)
++        eng.ring.clear()
++        self.assertIsNone(eng.agreement(now)["agree_pct"])
++
++    def test_append_feat_creates_header_once(self):
++        eng = mkeng(self.tmp)
++        sim = Sim(eng)
++        _, _, row = sim.run(20)
++        import time
++        svc.append_feat(self.tmp, row, time.time())
++        svc.append_feat(self.tmp, row, time.time())
++        files = [f for f in os.listdir(self.tmp) if f.startswith("feat-")]
++        self.assertEqual(len(files), 1)
++        with open(os.path.join(self.tmp, files[0])) as f:
++            self.assertEqual(len(f.read().splitlines()), 3)
++
++
++if __name__ == "__main__":
++    unittest.main()
++
++
++class ZoneLogAndScoreTests(unittest.TestCase):
++    def test_zone_log_migration_and_row(self):
++        import importlib.util
++        import csv as _csv
++        here = os.path.dirname(os.path.abspath(__file__))
++        zp = next(p for p in (os.path.join(here, "new", "zone-log", "zone_log.py"), os.path.join(here, "..", "zone-log", "zone_log.py"))
++                  if os.path.exists(p))
++        spec = importlib.util.spec_from_file_location("zone_log_new", zp)
++        zl = importlib.util.module_from_spec(spec)
++        spec.loader.exec_module(zl)
++        with tempfile.TemporaryDirectory() as d:
++            p = os.path.join(d, "zone-v3-x.csv")
++            old = zl.HEAD[:-2]
++            with open(p, "w", newline="") as f:
++                w = _csv.writer(f)
++                w.writerow(old)
++                w.writerow(["2026-10-30T10:00:00"] + ["a"] * (len(old) - 1))
++            self.assertTrue(zl.migrate(p))
++            rows = list(_csv.reader(open(p)))
++            self.assertEqual(rows[0], zl.HEAD)
++            self.assertEqual(len(rows[1]), len(zl.HEAD))
++            self.assertEqual(rows[1][-2:], ["", ""])
++            self.assertFalse(zl.migrate(p))                      # idempotent
++            self.assertFalse(zl.migrate(os.path.join(d, "missing.csv")))
++            st = zl.State()
++            st.ctx_t = T0
++            row = st.make_row(T0)
++            self.assertEqual(len(row), len(zl.HEAD))
++            self.assertEqual(row[-2:], ["", ""])
++            st.add_csi_state({"zone": "bed", "confidence": 0.4, "ts": T0 - 5})
++            self.assertEqual(st.make_row(T0)[-2:], ["bed", 0.4])
++            self.assertEqual(st.make_row(T0 + 500)[-2:], ["", ""])   # stale
++
++    def test_csi_score(self):
++        import csi_score as cs
++        rows = []
++        base = {"home": "on", "pc_online": "on", "pc_locked": "off", "pc_idle": "3", "radar": "off", "radar_cm": "",
++                "wd_light": "off", "wd_light_age_s": "", "kitchen_light": "off", "_day": "2026-10-30", "_hour": 12,
++                "zone": "pc_desk", "fp_zone": "bed"}
++        rows += [dict(base, csi_zone="pc_desk", csi_conf="0.5") for _ in range(8)]
++        rows += [dict(base, csi_zone="bed", csi_conf="0.1") for _ in range(2)]
++        rows += [dict(base, csi_zone="", csi_conf="") for _ in range(5)]      # skipped
++        sc = cs.score(rows)
++        n, acc, bal, _, _ = __import__("csi_replay").metrics(sc["ALL"]["csi_vs_weak"])
++        self.assertEqual((n, acc), (10, 0.8))
++        self.assertEqual(__import__("csi_replay").metrics(sc["ALL"]["ble_fp_vs_weak_same_rows"])[1], 0.0)
++        sc = cs.score(rows, min_conf=0.3)
++        self.assertEqual(__import__("csi_replay").metrics(sc["ALL"]["csi_vs_weak"])[0], 8)
+--- /dev/null
++++ b/presence-csi/smoke_live.py
+@@ -0,0 +1,35 @@
++"""Read-only smoke run: live MQTT in, Engine out to stdout. Publishes nothing. Usage: CSI_DIR=/tmp/x python3 smoke_live.py [seconds]"""
++import json, os, sys, time
++import paho.mqtt.client as mqtt
++import csi_svc as svc
++
++t0 = time.time()
++eng = svc.Engine()
++print("engine init %.1fs notes=%s seed=%d" % (time.time() - t0, eng.notes, len(eng.seed)), flush=True)
++c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1) if hasattr(mqtt, "CallbackAPIVersion") else mqtt.Client()
++c.username_pw_set(os.environ["MQTT_USER"], os.environ["MQTT_PASS"])
++c.on_connect = lambda cl, u, f, rc: [cl.subscribe(t) for t in ("presence/+/csi", "presence/zone/state")]
++
++def on_message(cl, u, m):
++    now = time.time()
++    try:
++        p = json.loads(m.payload)
++    except ValueError:
++        return
++    if m.topic == "presence/zone/state":
++        eng.on_ctx(p, now)
++    elif m.topic.endswith("/csi"):
++        eng.on_csi(m.topic.split("/")[1], p, now)
++
++c.on_message = on_message
++c.connect(os.environ.get("MQTT_HOST", "127.0.0.1"), 1883, 60)
++c.loop_start()
++end = time.time() + int(sys.argv[1] if len(sys.argv) > 1 else 90)
++while time.time() < end:
++    time.sleep(10 - time.time() % 10)
++    st, ag, row = eng.tick(time.time())
++    print(json.dumps({k: st[k] for k in ("zone", "confidence", "scores", "used_nodes", "live_zone", "fp_zone", "weak_label", "baseline_nodes", "baseline_span_h", "baseline_quiet_age_min", "training")}), flush=True)
++print(json.dumps(ag), flush=True)
++eng.save()
++print("saved; state size", os.path.getsize(eng._path()))
++c.loop_stop()
+--- /dev/null
++++ b/systemd/presence-csi.service
+@@ -0,0 +1,17 @@
++[Unit]
++Description=CSI shadow zoning (MQTT presence/+/csi -> sensor.rp_csi_zone, shadow only)
++After=mosquitto.service network-online.target
++
++[Service]
++EnvironmentFile=/etc/presence-ble.env
++Environment=CSI_DIR=/var/lib/presence-csi
++Environment=ZONELOG_DIR=/var/lib/zone-log
++Environment=LABEL_DB=/var/lib/presence-labels/labels.db
++WorkingDirectory=/opt/presence-csi
++ExecStart=/usr/bin/python3 /opt/presence-csi/csi_svc.py
++Restart=always
++RestartSec=10
++Nice=10
++
++[Install]
++WantedBy=multi-user.target
