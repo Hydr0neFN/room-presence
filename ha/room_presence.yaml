@@ -23,10 +23,10 @@ input_boolean:
     icon: mdi:motion-sensor
     initial: false
   # Kill switch for the CSI-led zone. OFF restores the BLE-only cascade exactly (same branches, same order).
+  # No `initial`: HA restores the last state, so OFF survives a restart. Turned on once at deploy.
   rp_csi_lead:
     name: Room presence - CSI leads the zone
     icon: mdi:wifi-marker
-    initial: true
 
 input_datetime:
   # Written by automation rp_kitchen_light_operated: last real on/off change of the kitchen light (not an
@@ -37,21 +37,20 @@ input_datetime:
     has_time: true
 
 input_number:
+  # No `initial` on the two CSI numbers: restored across restarts; set to 0.15 / 30 once at deploy.
   # CSI is used only when its confidence is >= this value (T = 0.15, evidence: csi_conf_sweep.py, see the csi-lead commit).
   rp_csi_min_conf:
     name: Room presence - CSI minimum confidence
     min: 0
     max: 1
     step: 0.01
-    initial: 0.15
   # A CSI zone whose payload timestamp (attribute ts, set by the presence-csi service) is older than this is stale -> BLE fingerprint fallback.
   rp_csi_stale_s:
     name: Room presence - CSI max age
-    min: 5
+    min: 15
     max: 300
     step: 5
     unit_of_measurement: s
-    initial: 30
   rp_kitchen_max_cm:
     name: Room presence - kitchen radar max distance
     min: 50
@@ -1181,7 +1180,7 @@ template:
           {% elif kitchen %}{% set ns.z = 'kitchen' %}
           {% elif bath %}{% set ns.z = 'bathroom' %}
           {% elif [a, b, c, d, e] | max < floor %}{% set ns.z = 'home' %}
-          {% elif csi_ok and not (nbed and cz in ['work_desk', 'pc_desk']) %}{% set ns.soft = true %}{% set ns.z = cz %}
+          {% elif csi_ok and not (nbed and cz in ['work_desk', 'pc_desk']) %}{% set ns.soft = not (nbed and cz == 'bed') %}{% set ns.z = cz %}
           {% elif nbed %}{% set ns.z = 'bed' %}
           {% elif fp not in ['none', 'unknown', 'unavailable'] %}
             {% set ns.soft = true %}

@@ -48,6 +48,12 @@ views:
         name: CSI
         icon: mdi:wifi-marker
       - type: entity
+        entity: input_boolean.rp_csi_lead
+        name: CSI 主導
+        icon: mdi:wifi-marker
+        tap_action:
+          action: toggle
+      - type: entity
         entity: sensor.room_environment_temperature
         name: 室溫
       - type: entity
@@ -1119,7 +1125,7 @@ views:
               | 項目 | 值 |
               |---|---|
               | CSI 區域 | {{ states('sensor.rp_csi_zone') }}（信心 {{ ((a | float(0)) * 100) | round(0) | int }}%） |
-              | 正式判斷（不受影響） | {{ states('sensor.yui_room_zone') }} |
+              | 正式判斷（CSI 主導 {{ states('input_boolean.rp_csi_lead') }}） | {{ states('sensor.yui_room_zone') }} |
               | BLE 指紋區域 | {{ states('sensor.rp_fp_zone') }} |
               | 各區分數（越小越近） | {% for k, v in (state_attr('sensor.rp_csi_zone', 'scores') or {}).items() %}{{ k }} {{ v }}　{% else %}—{% endfor %} |
               | 參與節點 | {{ state_attr('sensor.rp_csi_zone', 'used_nodes') or '無' }} |
