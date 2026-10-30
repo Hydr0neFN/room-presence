@@ -11,6 +11,8 @@
 #   binary_sensor.kitchenradar_presence + sensor.kitchenradar_detection_distance (LD2410, kitchen)
 #   sensor.chu_fang_kitchenradar_wifi_signal / sensor.neopixel_neopixel_wifi_signal (ESPHome Wi-Fi link RSSI, 1 Hz)
 # Output: sensor.yui_room_zone = kitchen | work_desk | pc_desk | bed | bathroom | home (at home, place unknown) | away
+# CSI lead: with input_boolean.rp_csi_lead ON (kill switch), a fresh, confident sensor.rp_csi_zone (presence-csi
+# service) replaces the BLE fingerprint step of the cascade (the rules above it still win). OFF = the BLE-only cascade.
 # and binary_sensor.room_zone_<zone>. Device-free WiFi features (sensor.rp_link_*_motion,
 # sensor.rp_<node>_csi_still) feed the fingerprint matcher with weight input_number.rp_feat_weight_db. Nothing here acts on the lights unless
 # input_boolean.room_presence_automations is on (it is OFF by default).
@@ -20,6 +22,11 @@ input_boolean:
     name: Room presence automations
     icon: mdi:motion-sensor
     initial: false
+  # Kill switch for the CSI-led zone. OFF restores the BLE-only cascade exactly (same branches, same order).
+  rp_csi_lead:
+    name: Room presence - CSI leads the zone
+    icon: mdi:wifi-marker
+    initial: true
 
 input_datetime:
   # Written by automation rp_kitchen_light_operated: last real on/off change of the kitchen light (not an
@@ -30,6 +37,21 @@ input_datetime:
     has_time: true
 
 input_number:
+  # CSI is used only when its confidence is >= this value (T = 0.15, evidence: csi_conf_sweep.py, see the csi-lead commit).
+  rp_csi_min_conf:
+    name: Room presence - CSI minimum confidence
+    min: 0
+    max: 1
+    step: 0.01
+    initial: 0.15
+  # A CSI zone whose payload timestamp (attribute ts, set by the presence-csi service) is older than this is stale -> BLE fingerprint fallback.
+  rp_csi_stale_s:
+    name: Room presence - CSI max age
+    min: 5
+    max: 300
+    step: 5
+    unit_of_measurement: s
+    initial: 30
   rp_kitchen_max_cm:
     name: Room presence - kitchen radar max distance
     min: 50
@@ -1023,108 +1045,6 @@ template:
           {% endif %}
           {% set h = states('input_number.rp_fp_hysteresis') | float(2.5) %}
           {{ 'none' if use.tw < 1.5 else (prev if prev in zones and ns.pd - ns.bd < h else ns.best) }}
-      # Zone, in order (first match wins):
-      #   PC unlocked and idle < 60 s            -> pc_desk
-      #   yui_home off                           -> away
-      #   prev pc_desk, PC unlocked, idle < 300 s, no radar -> pc_desk   (hold: a pause at the PC is not leaving it)
-      #   kitchen radar hint (held 30 s)         -> kitchen
-      #   bathroom radar hint (held 30 s; only when rp_bathroom_radar_min_cm > 0) -> bathroom
-      #   no node hears the phone (< floor)      -> home
-      #   night bed rule                         -> bed
-      #   fingerprint zone (incl. 'bathroom', which needs no kitchen evidence); 'kitchen' only with evidence (radar; power / light only within 2 min of the radar), else home; no fingerprint zone -> home (legacy pcdesk/workdesk comparison only
-      #   when no fingerprints exist at all)
-      # Minimum dwell: a change driven only by the fingerprint / fallback (not by PC activity, away, radar or the
-      # night rule) waits until the current zone is 45 s old.
-      - name: "Yui room zone"
-        unique_id: yui_room_zone
-        icon: mdi:map-marker-radius
-        state: >
-          {% set pc_unlocked = is_state('binary_sensor.rp_pc_online', 'on')
-               and is_state('binary_sensor.rp_pc_locked', 'off') %}
-          {% set idle = states('sensor.rp_pc_idle') | float(9999) %}
-          {% set pc_active = pc_unlocked and idle < 60 %}
-          {% set kitchen = is_state('binary_sensor.rp_kitchen_radar_hint', 'on') %}
-          {% set bath = is_state('binary_sensor.rp_bathroom_radar_hint', 'on') %}
-          {% set kit_ev = is_state('binary_sensor.rp_kitchen_evidence', 'on') %}
-          {% set a = states('sensor.rp_pcdesk_signal') | float(-127) %}
-          {% set b = states('sensor.rp_workdesk_signal') | float(-127) %}
-          {% set c = states('sensor.rp_nlpi_signal') | float(-127) %}
-          {% set d = states('sensor.rp_kitchen_signal') | float(-127) %}
-          {% set e = states('sensor.rp_cyd_signal') | float(-127) %}
-          {% set h = states('input_number.rp_hysteresis_db') | float(6) %}
-          {% set floor = states('input_number.rp_min_rssi') | float(-90) %}
-          {% set fp = states('sensor.rp_fp_zone') %}
-          {% set prev = this.state | default('unknown') if this is defined else 'unknown' %}
-          {% set age = (now() - this.last_changed).total_seconds() if (this is defined and this.last_changed is defined) else 9999 %}
-          {% set ns = namespace(z='home', soft=false) %}
-          {% if pc_active %}{% set ns.z = 'pc_desk' %}
-          {% elif is_state('binary_sensor.yui_home', 'off') %}{% set ns.z = 'away' %}
-          {% elif prev == 'pc_desk' and pc_unlocked and idle < 300 and not kitchen and not bath %}{% set ns.z = 'pc_desk' %}
-          {% elif kitchen %}{% set ns.z = 'kitchen' %}
-          {% elif bath %}{% set ns.z = 'bathroom' %}
-          {% elif [a, b, c, d, e] | max < floor %}{% set ns.z = 'home' %}
-          {% elif is_state('binary_sensor.rp_night_bed', 'on') %}{% set ns.z = 'bed' %}
-          {% elif fp not in ['none', 'unknown', 'unavailable'] %}
-            {% set ns.soft = true %}
-            {% set ns.z = fp if (fp != 'kitchen' or kit_ev) else 'home' %}
-          {% elif state_attr('sensor.rp_fingerprints', 'zones') %}{% set ns.soft = true %}{% set ns.z = 'home' %}
-          {% elif prev == 'pc_desk' %}{% set ns.soft = true %}{% set ns.z = 'work_desk' if b > a + h else 'pc_desk' %}
-          {% elif prev == 'work_desk' %}{% set ns.soft = true %}{% set ns.z = 'pc_desk' if a > b + h else 'work_desk' %}
-          {% else %}{% set ns.soft = true %}{% set ns.z = 'pc_desk' if a >= b else 'work_desk' %}{% endif %}
-          {% if ns.soft and prev in ['kitchen', 'work_desk', 'pc_desk', 'bed', 'bathroom', 'home'] and ns.z != prev and age < 45 %}{{ prev }}{% else %}{{ ns.z }}{% endif %}
-        attributes:
-          home: "{{ states('binary_sensor.yui_home') }}"
-          pc_signal_dbm: "{{ states('sensor.rp_pcdesk_signal') }}"
-          work_signal_dbm: "{{ states('sensor.rp_workdesk_signal') }}"
-          bed_signal_dbm: "{{ states('sensor.rp_nlpi_signal') }}"
-          kitchen_signal_dbm: "{{ states('sensor.rp_kitchen_signal') }}"
-          cyd_signal_dbm: "{{ states('sensor.rp_cyd_signal') }}"
-          pc_idle_s: "{{ states('sensor.rp_pc_idle') }}"
-          kitchen_radar: "{{ states('binary_sensor.kitchenradar_presence') }}"
-          kitchen_distance_cm: "{{ states('sensor.kitchenradar_detection_distance') }}"
-          kitchen_evidence: "{{ states('binary_sensor.rp_kitchen_evidence') }}"
-          bathroom_radar: "{{ states('binary_sensor.rp_bathroom_radar_hint') }}"
-          night_bed: "{{ states('binary_sensor.rp_night_bed') }}"
-      # Debug (dashboard view 定位校準 -> 除錯): which rule of 'Yui room zone' fired, and the per-zone fingerprint
-      # distance (same maths as 'RP fp zone', dB; lower = closer; hysteresis not applied). Display only.
-      - name: "RP zone reason"
-        unique_id: rp_zone_reason
-        icon: mdi:bug-outline
-        state: >
-          {% set pc_unlocked = is_state('binary_sensor.rp_pc_online', 'on')
-               and is_state('binary_sensor.rp_pc_locked', 'off') %}
-          {% set idle = states('sensor.rp_pc_idle') | float(9999) %}
-          {% set kitchen = is_state('binary_sensor.rp_kitchen_radar_hint', 'on') %}
-          {% set bath = is_state('binary_sensor.rp_bathroom_radar_hint', 'on') %}
-          {% set floor = states('input_number.rp_min_rssi') | float(-90) %}
-          {% set mx = [states('sensor.rp_pcdesk_signal') | float(-127), states('sensor.rp_workdesk_signal') | float(-127),
-                       states('sensor.rp_nlpi_signal') | float(-127), states('sensor.rp_kitchen_signal') | float(-127),
-                       states('sensor.rp_cyd_signal') | float(-127)] | max %}
-          {% set fp = states('sensor.rp_fp_zone') %}
-          {% set z = states('sensor.yui_room_zone') %}
-          {% if pc_unlocked and idle < 60 %}PC 使用中（閒置 < 60 秒）
-          {% elif is_state('binary_sensor.yui_home', 'off') %}不在家
-          {% elif z == 'pc_desk' and pc_unlocked and idle < 300 and not kitchen and not bath %}PC 已解鎖、閒置 < 300 秒，維持電腦桌
-          {% elif kitchen %}廚房雷達（< {{ states('input_number.rp_kitchen_max_cm') | int(250) }} cm）
-          {% elif bath %}浴室雷達（>= {{ states('input_number.rp_bathroom_radar_min_cm') | int(0) }} cm）
-          {% elif mx < floor %}所有節點都聽不到手機（< {{ floor | int }} dBm）
-          {% elif is_state('binary_sensor.rp_night_bed', 'on') %}夜間床規則
-          {% elif fp not in ['none', 'unknown', 'unavailable'] %}指紋：{{ fp }}{% if fp == 'kitchen' and not is_state('binary_sensor.rp_kitchen_evidence', 'on') %}（缺少廚房證據，改為在家）{% endif %}
-          {% else %}沒有指紋，在家
-          {% endif %}
-        attributes:
-          fp_zone: "{{ states('sensor.rp_fp_zone') }}"
-          zone: "{{ states('sensor.yui_room_zone') }}"
-          radar_hint: "{{ states('binary_sensor.rp_kitchen_radar_hint') }}"
-          radar_recent: "{{ states('binary_sensor.rp_kitchen_radar_recent') }}"
-          bathroom_radar_hint: "{{ states('binary_sensor.rp_bathroom_radar_hint') }}"
-          power_max120_w: "{{ states('sensor.rp_power_max120') }}"
-          kitchen_light_age_s: "{{ (now().timestamp() - state_attr('input_datetime.rp_kitchen_light_op', 'timestamp') | float(0)) | int }}"
-          kitchen_evidence: "{{ states('binary_sensor.rp_kitchen_evidence') }}"
-          night_bed: "{{ states('binary_sensor.rp_night_bed') }}"
-          pc_online: "{{ states('binary_sensor.rp_pc_online') }}"
-          pc_locked: "{{ states('binary_sensor.rp_pc_locked') }}"
-          pc_idle_s: "{{ states('sensor.rp_pc_idle') }}"
       - name: "RP fp debug"
         unique_id: rp_fp_debug
         icon: mdi:ruler
@@ -1178,6 +1098,227 @@ template:
             {% endfor %}
             {{ ns.l | join(',') }}
           feature_weight_db: "{{ states('input_number.rp_feat_weight_db') }}"
+
+  # Trigger-based so the CSI staleness check is re-evaluated every 10 s (a state-based template using only now()
+  # re-renders once a minute). Same two entities / unique_ids as before; the discrete inputs also trigger immediately.
+  - trigger:
+      - trigger: time_pattern
+        seconds: "/10"
+      - trigger: homeassistant
+        event: start
+      - trigger: state
+        entity_id:
+          - sensor.rp_csi_zone
+          - input_boolean.rp_csi_lead
+          - input_number.rp_csi_min_conf
+          - input_number.rp_csi_stale_s
+          - input_number.rp_min_rssi
+          - binary_sensor.yui_home
+          - binary_sensor.rp_pc_online
+          - binary_sensor.rp_pc_locked
+          - sensor.rp_pc_idle
+          - binary_sensor.rp_kitchen_radar_hint
+          - binary_sensor.rp_bathroom_radar_hint
+          - binary_sensor.rp_kitchen_evidence
+          - binary_sensor.rp_night_bed
+          - sensor.rp_fp_zone
+          - sensor.rp_pcdesk_signal
+          - sensor.rp_workdesk_signal
+          - sensor.rp_nlpi_signal
+          - sensor.rp_kitchen_signal
+          - sensor.rp_cyd_signal
+    sensor:
+      # Zone, in order (first match wins):
+      #   PC unlocked and idle < 60 s            -> pc_desk
+      #   yui_home off                           -> away
+      #   prev pc_desk, PC unlocked, idle < 300 s, no radar -> pc_desk   (hold: a pause at the PC is not leaving it)
+      #   kitchen radar hint (held 30 s)         -> kitchen
+      #   bathroom radar hint (held 30 s; only when rp_bathroom_radar_min_cm > 0) -> bathroom
+      #   no node hears the phone (< floor)      -> home
+      #   CSI zone (rp_csi_lead on, age <= rp_csi_stale_s, confidence >= rp_csi_min_conf, zone in the 5 classes)
+      #                                          -> that zone (a CSI work_desk / pc_desk is overridden by the night bed rule)
+      #   night bed rule                         -> bed
+      #   fingerprint zone (incl. 'bathroom', which needs no kitchen evidence); 'kitchen' only with evidence (radar; power / light only within 2 min of the radar), else home; no fingerprint zone -> home (legacy pcdesk/workdesk comparison only
+      #   when no fingerprints exist at all)
+      # Minimum dwell: a change driven only by CSI or the fingerprint / fallback (not by PC activity, away, radar or the
+      # night rule) waits until the current zone is 45 s old.
+      - name: "Yui room zone"
+        unique_id: yui_room_zone
+        icon: mdi:map-marker-radius
+        state: >
+          {% set pc_unlocked = is_state('binary_sensor.rp_pc_online', 'on')
+               and is_state('binary_sensor.rp_pc_locked', 'off') %}
+          {% set idle = states('sensor.rp_pc_idle') | float(9999) %}
+          {% set pc_active = pc_unlocked and idle < 60 %}
+          {% set kitchen = is_state('binary_sensor.rp_kitchen_radar_hint', 'on') %}
+          {% set bath = is_state('binary_sensor.rp_bathroom_radar_hint', 'on') %}
+          {% set kit_ev = is_state('binary_sensor.rp_kitchen_evidence', 'on') %}
+          {% set a = states('sensor.rp_pcdesk_signal') | float(-127) %}
+          {% set b = states('sensor.rp_workdesk_signal') | float(-127) %}
+          {% set c = states('sensor.rp_nlpi_signal') | float(-127) %}
+          {% set d = states('sensor.rp_kitchen_signal') | float(-127) %}
+          {% set e = states('sensor.rp_cyd_signal') | float(-127) %}
+          {% set h = states('input_number.rp_hysteresis_db') | float(6) %}
+          {% set floor = states('input_number.rp_min_rssi') | float(-90) %}
+          {% set fp = states('sensor.rp_fp_zone') %}
+          {# CSI gate: a missing / unknown / non-numeric confidence or timestamp is simply 'not valid' (BLE fallback), never an error #}
+          {% set cs = states.sensor.rp_csi_zone %}
+          {% set cz = cs.state if cs is not none else 'unavailable' %}
+          {% set cc = state_attr('sensor.rp_csi_zone', 'confidence') | float(-1) %}
+          {% set cts = state_attr('sensor.rp_csi_zone', 'ts') | float(none) %}
+          {% set cage = (now().timestamp() - cts) if cts is not none else 9999 %}
+          {% set csi_ok = is_state('input_boolean.rp_csi_lead', 'on')
+               and cz in ['kitchen', 'work_desk', 'pc_desk', 'bed', 'bathroom']
+               and cage <= (states('input_number.rp_csi_stale_s') | float(30))
+               and cc >= (states('input_number.rp_csi_min_conf') | float(0.15)) %}
+          {% set nbed = is_state('binary_sensor.rp_night_bed', 'on') %}
+          {% set prev = this.state | default('unknown') if this is defined else 'unknown' %}
+          {% set age = (now() - this.last_changed).total_seconds() if (this is defined and this.last_changed is defined) else 9999 %}
+          {% set ns = namespace(z='home', soft=false) %}
+          {% if pc_active %}{% set ns.z = 'pc_desk' %}
+          {% elif is_state('binary_sensor.yui_home', 'off') %}{% set ns.z = 'away' %}
+          {% elif prev == 'pc_desk' and pc_unlocked and idle < 300 and not kitchen and not bath %}{% set ns.z = 'pc_desk' %}
+          {% elif kitchen %}{% set ns.z = 'kitchen' %}
+          {% elif bath %}{% set ns.z = 'bathroom' %}
+          {% elif [a, b, c, d, e] | max < floor %}{% set ns.z = 'home' %}
+          {% elif csi_ok and not (nbed and cz in ['work_desk', 'pc_desk']) %}{% set ns.soft = true %}{% set ns.z = cz %}
+          {% elif nbed %}{% set ns.z = 'bed' %}
+          {% elif fp not in ['none', 'unknown', 'unavailable'] %}
+            {% set ns.soft = true %}
+            {% set ns.z = fp if (fp != 'kitchen' or kit_ev) else 'home' %}
+          {% elif state_attr('sensor.rp_fingerprints', 'zones') %}{% set ns.soft = true %}{% set ns.z = 'home' %}
+          {% elif prev == 'pc_desk' %}{% set ns.soft = true %}{% set ns.z = 'work_desk' if b > a + h else 'pc_desk' %}
+          {% elif prev == 'work_desk' %}{% set ns.soft = true %}{% set ns.z = 'pc_desk' if a > b + h else 'work_desk' %}
+          {% else %}{% set ns.soft = true %}{% set ns.z = 'pc_desk' if a >= b else 'work_desk' %}{% endif %}
+          {% if ns.soft and prev in ['kitchen', 'work_desk', 'pc_desk', 'bed', 'bathroom', 'home'] and ns.z != prev and age < 45 %}{{ prev }}{% else %}{{ ns.z }}{% endif %}
+        attributes:
+          home: "{{ states('binary_sensor.yui_home') }}"
+          pc_signal_dbm: "{{ states('sensor.rp_pcdesk_signal') }}"
+          work_signal_dbm: "{{ states('sensor.rp_workdesk_signal') }}"
+          bed_signal_dbm: "{{ states('sensor.rp_nlpi_signal') }}"
+          kitchen_signal_dbm: "{{ states('sensor.rp_kitchen_signal') }}"
+          cyd_signal_dbm: "{{ states('sensor.rp_cyd_signal') }}"
+          pc_idle_s: "{{ states('sensor.rp_pc_idle') }}"
+          kitchen_radar: "{{ states('binary_sensor.kitchenradar_presence') }}"
+          kitchen_distance_cm: "{{ states('sensor.kitchenradar_detection_distance') }}"
+          kitchen_evidence: "{{ states('binary_sensor.rp_kitchen_evidence') }}"
+          bathroom_radar: "{{ states('binary_sensor.rp_bathroom_radar_hint') }}"
+          night_bed: "{{ states('binary_sensor.rp_night_bed') }}"
+          csi_lead: "{{ states('input_boolean.rp_csi_lead') }}"
+      # Debug (dashboard view 定位校準 -> 除錯): which rule of 'Yui room zone' fired (state = rule key only: csi | ble_fallback | pc_active | away | pc_hold |
+      # kitchen_radar | bathroom_radar | phone_unheard | night_bed; Chinese text in attribute `text`), and the per-zone fingerprint
+      # distance (same maths as 'RP fp zone', dB; lower = closer; hysteresis not applied). Display only.
+      - name: "RP zone reason"
+        unique_id: rp_zone_reason
+        icon: mdi:bug-outline
+        state: >
+          {% set pc_unlocked = is_state('binary_sensor.rp_pc_online', 'on')
+               and is_state('binary_sensor.rp_pc_locked', 'off') %}
+          {% set idle = states('sensor.rp_pc_idle') | float(9999) %}
+          {% set kitchen = is_state('binary_sensor.rp_kitchen_radar_hint', 'on') %}
+          {% set bath = is_state('binary_sensor.rp_bathroom_radar_hint', 'on') %}
+          {% set floor = states('input_number.rp_min_rssi') | float(-90) %}
+          {% set mx = [states('sensor.rp_pcdesk_signal') | float(-127), states('sensor.rp_workdesk_signal') | float(-127),
+                       states('sensor.rp_nlpi_signal') | float(-127), states('sensor.rp_kitchen_signal') | float(-127),
+                       states('sensor.rp_cyd_signal') | float(-127)] | max %}
+          {% set fp = states('sensor.rp_fp_zone') %}
+          {% set z = states('sensor.yui_room_zone') %}
+          {# CSI gate: a missing / unknown / non-numeric confidence or timestamp is simply 'not valid' (BLE fallback), never an error #}
+          {% set cs = states.sensor.rp_csi_zone %}
+          {% set cz = cs.state if cs is not none else 'unavailable' %}
+          {% set cc = state_attr('sensor.rp_csi_zone', 'confidence') | float(-1) %}
+          {% set cts = state_attr('sensor.rp_csi_zone', 'ts') | float(none) %}
+          {% set cage = (now().timestamp() - cts) if cts is not none else 9999 %}
+          {% set csi_ok = is_state('input_boolean.rp_csi_lead', 'on')
+               and cz in ['kitchen', 'work_desk', 'pc_desk', 'bed', 'bathroom']
+               and cage <= (states('input_number.rp_csi_stale_s') | float(30))
+               and cc >= (states('input_number.rp_csi_min_conf') | float(0.15)) %}
+          {% set nbed = is_state('binary_sensor.rp_night_bed', 'on') %}
+          {% set key = 'ble_fallback' %}
+          {% if pc_unlocked and idle < 60 %}{% set key = 'pc_active' %}
+          {% elif is_state('binary_sensor.yui_home', 'off') %}{% set key = 'away' %}
+          {% elif z == 'pc_desk' and pc_unlocked and idle < 300 and not kitchen and not bath %}{% set key = 'pc_hold' %}
+          {% elif kitchen %}{% set key = 'kitchen_radar' %}
+          {% elif bath %}{% set key = 'bathroom_radar' %}
+          {% elif mx < floor %}{% set key = 'phone_unheard' %}
+          {% elif csi_ok and not (nbed and cz in ['work_desk', 'pc_desk']) %}{% set key = 'csi' %}
+          {% elif nbed %}{% set key = 'night_bed' %}
+          {% endif %}
+          {{ key }}
+        attributes:
+          text: >
+            {% set pc_unlocked = is_state('binary_sensor.rp_pc_online', 'on')
+                 and is_state('binary_sensor.rp_pc_locked', 'off') %}
+            {% set idle = states('sensor.rp_pc_idle') | float(9999) %}
+            {% set kitchen = is_state('binary_sensor.rp_kitchen_radar_hint', 'on') %}
+            {% set bath = is_state('binary_sensor.rp_bathroom_radar_hint', 'on') %}
+            {% set floor = states('input_number.rp_min_rssi') | float(-90) %}
+            {% set mx = [states('sensor.rp_pcdesk_signal') | float(-127), states('sensor.rp_workdesk_signal') | float(-127),
+                           states('sensor.rp_nlpi_signal') | float(-127), states('sensor.rp_kitchen_signal') | float(-127),
+                           states('sensor.rp_cyd_signal') | float(-127)] | max %}
+            {% set fp = states('sensor.rp_fp_zone') %}
+            {% set z = states('sensor.yui_room_zone') %}
+            {# CSI gate: a missing / unknown / non-numeric confidence or timestamp is simply 'not valid' (BLE fallback), never an error #}
+            {% set cs = states.sensor.rp_csi_zone %}
+            {% set cz = cs.state if cs is not none else 'unavailable' %}
+            {% set cc = state_attr('sensor.rp_csi_zone', 'confidence') | float(-1) %}
+            {% set cts = state_attr('sensor.rp_csi_zone', 'ts') | float(none) %}
+            {% set cage = (now().timestamp() - cts) if cts is not none else 9999 %}
+            {% set csi_ok = is_state('input_boolean.rp_csi_lead', 'on')
+                 and cz in ['kitchen', 'work_desk', 'pc_desk', 'bed', 'bathroom']
+                 and cage <= (states('input_number.rp_csi_stale_s') | float(30))
+                 and cc >= (states('input_number.rp_csi_min_conf') | float(0.15)) %}
+            {% set nbed = is_state('binary_sensor.rp_night_bed', 'on') %}
+            {% set key = 'ble_fallback' %}
+            {% if pc_unlocked and idle < 60 %}{% set key = 'pc_active' %}
+            {% elif is_state('binary_sensor.yui_home', 'off') %}{% set key = 'away' %}
+            {% elif z == 'pc_desk' and pc_unlocked and idle < 300 and not kitchen and not bath %}{% set key = 'pc_hold' %}
+            {% elif kitchen %}{% set key = 'kitchen_radar' %}
+            {% elif bath %}{% set key = 'bathroom_radar' %}
+            {% elif mx < floor %}{% set key = 'phone_unheard' %}
+            {% elif csi_ok and not (nbed and cz in ['work_desk', 'pc_desk']) %}{% set key = 'csi' %}
+            {% elif nbed %}{% set key = 'night_bed' %}
+            {% endif %}
+            {% set csi_why = '' if key == 'csi' else ('（CSI 關閉）' if not is_state('input_boolean.rp_csi_lead', 'on') else ('（CSI 無效或過期）' if cz not in ['kitchen', 'work_desk', 'pc_desk', 'bed', 'bathroom'] or cage > (states('input_number.rp_csi_stale_s') | float(30)) else '（CSI 信心不足）')) %}
+            {% if key == 'pc_active' %}PC 使用中（閒置 < 60 秒）
+            {% elif key == 'away' %}不在家
+            {% elif key == 'pc_hold' %}PC 已解鎖、閒置 < 300 秒，維持電腦桌
+            {% elif key == 'kitchen_radar' %}廚房雷達（< {{ states('input_number.rp_kitchen_max_cm') | int(250) }} cm）
+            {% elif key == 'bathroom_radar' %}浴室雷達（>= {{ states('input_number.rp_bathroom_radar_min_cm') | int(0) }} cm）
+            {% elif key == 'phone_unheard' %}所有節點都聽不到手機（< {{ floor | int }} dBm）
+            {% elif key == 'csi' %}CSI 區域：{{ cz }}（信心 {{ (cc * 100) | round(0) | int }}%，{{ cage | round(0) | int }} 秒前）
+            {% elif key == 'night_bed' %}夜間床規則{% if csi_ok %}（CSI 為 {{ cz }}，夜間以床為準）{% endif %}
+            {% elif fp not in ['none', 'unknown', 'unavailable'] %}BLE 指紋：{{ fp }}{% if fp == 'kitchen' and not is_state('binary_sensor.rp_kitchen_evidence', 'on') %}（缺少廚房證據，改為在家）{% endif %}{{ csi_why }}
+            {% else %}沒有指紋，在家{{ csi_why }}
+            {% endif %}
+          csi_lead: "{{ states('input_boolean.rp_csi_lead') }}"
+          csi_zone: "{{ states('sensor.rp_csi_zone') }}"
+          csi_conf: "{{ state_attr('sensor.rp_csi_zone', 'confidence') }}"
+          csi_valid: >
+            {# CSI gate: a missing / unknown / non-numeric confidence or timestamp is simply 'not valid' (BLE fallback), never an error #}
+            {% set cs = states.sensor.rp_csi_zone %}
+            {% set cz = cs.state if cs is not none else 'unavailable' %}
+            {% set cc = state_attr('sensor.rp_csi_zone', 'confidence') | float(-1) %}
+            {% set cts = state_attr('sensor.rp_csi_zone', 'ts') | float(none) %}
+            {% set cage = (now().timestamp() - cts) if cts is not none else 9999 %}
+            {% set csi_ok = is_state('input_boolean.rp_csi_lead', 'on')
+                 and cz in ['kitchen', 'work_desk', 'pc_desk', 'bed', 'bathroom']
+                 and cage <= (states('input_number.rp_csi_stale_s') | float(30))
+                 and cc >= (states('input_number.rp_csi_min_conf') | float(0.15)) %}
+            {% set nbed = is_state('binary_sensor.rp_night_bed', 'on') %}
+            {{ csi_ok }}
+          fp_zone: "{{ states('sensor.rp_fp_zone') }}"
+          zone: "{{ states('sensor.yui_room_zone') }}"
+          radar_hint: "{{ states('binary_sensor.rp_kitchen_radar_hint') }}"
+          radar_recent: "{{ states('binary_sensor.rp_kitchen_radar_recent') }}"
+          bathroom_radar_hint: "{{ states('binary_sensor.rp_bathroom_radar_hint') }}"
+          power_max120_w: "{{ states('sensor.rp_power_max120') }}"
+          kitchen_light_age_s: "{{ (now().timestamp() - state_attr('input_datetime.rp_kitchen_light_op', 'timestamp') | float(0)) | int }}"
+          kitchen_evidence: "{{ states('binary_sensor.rp_kitchen_evidence') }}"
+          night_bed: "{{ states('binary_sensor.rp_night_bed') }}"
+          pc_online: "{{ states('binary_sensor.rp_pc_online') }}"
+          pc_locked: "{{ states('binary_sensor.rp_pc_locked') }}"
+          pc_idle_s: "{{ states('sensor.rp_pc_idle') }}"
   - binary_sensor:
       - name: "Room zone kitchen"
         unique_id: room_zone_kitchen

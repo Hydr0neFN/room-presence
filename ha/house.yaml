@@ -45,7 +45,7 @@ views:
         icon: mdi:map-marker
       - type: entity
         entity: sensor.rp_csi_label
-        name: CSI（影子）
+        name: CSI
         icon: mdi:wifi-marker
       - type: entity
         entity: sensor.room_environment_temperature
@@ -1065,7 +1065,7 @@ views:
             content: >-
               ## 區域：{{ states('sensor.yui_room_zone') }}
 
-              **判斷依據**：{{ states('sensor.rp_zone_reason') }}
+              **判斷依據**：{{ state_attr('sensor.rp_zone_reason', 'text') }}（規則：{{ states('sensor.rp_zone_reason') }}）
 
               **指紋最近區域**：{{ states('sensor.rp_fp_zone') }}
               （CSI 特徵權重 {{ state_attr('sensor.rp_fp_debug', 'feature_weight_db') }} dB）
@@ -1109,7 +1109,7 @@ views:
               閒置：{{ states('sensor.rp_pc_idle') }} 秒
 
           - type: heading
-            heading: CSI 影子模式（只記錄，不影響上面的判斷）
+            heading: CSI 區域判斷（rp_csi_lead 開啟時主導區域；關閉則只記錄，不影響上面的判斷）
           - type: markdown
             grid_options:
               columns: full
@@ -1118,7 +1118,7 @@ views:
               {%- set a = state_attr('sensor.rp_csi_zone', 'confidence') -%}
               | 項目 | 值 |
               |---|---|
-              | CSI 影子區域 | {{ states('sensor.rp_csi_zone') }}（信心 {{ ((a | float(0)) * 100) | round(0) | int }}%） |
+              | CSI 區域 | {{ states('sensor.rp_csi_zone') }}（信心 {{ ((a | float(0)) * 100) | round(0) | int }}%） |
               | 正式判斷（不受影響） | {{ states('sensor.yui_room_zone') }} |
               | BLE 指紋區域 | {{ states('sensor.rp_fp_zone') }} |
               | 各區分數（越小越近） | {% for k, v in (state_attr('sensor.rp_csi_zone', 'scores') or {}).items() %}{{ k }} {{ v }}　{% else %}—{% endfor %} |
