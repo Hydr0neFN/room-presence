@@ -25,6 +25,11 @@
 #ifndef CSI_PUBLISH_MS
 #define CSI_PUBLISH_MS 500
 #endif
+// Minimum CSI frames in the 1 s window for a message to count as ok (and to compute
+// motion/still). 8 was tuned for a good link; weak-link boards lower it via -D CSI_MIN_N=.
+#ifndef CSI_MIN_N
+#define CSI_MIN_N 8
+#endif
 #ifndef CSI_WINDOW_MS
 #define CSI_WINDOW_MS 1000
 #endif
@@ -227,7 +232,7 @@ void publish()
             mstd = mean > 0 ? sqrtf(vm > 0 ? vm : 0) / mean * 1000.0f : 0;
             rssiSd = sqrtf(vr > 0 ? vr : 0);
         }
-        if (n >= 8)
+        if (n >= CSI_MIN_N)
         {
             float tot = 0;
             for (int g = 0; g < GROUPS; g++)
@@ -260,7 +265,7 @@ void publish()
         xSemaphoreGive(g_mux);
     }
 
-    const int ok = (g_running && n >= 8) ? 1 : 0;
+    const int ok = (g_running && n >= CSI_MIN_N) ? 1 : 0;
     if (!ok)
         mean = mstd = motion = rssiMean = rssiSd = 0, still = -1.0f, memset(gstd, 0, sizeof(gstd));
     char buf[384];
