@@ -211,7 +211,7 @@ bool startCsi()
 void publish()
 {
     uint32_t now = millis();
-    int n = 0, stillN = 0, gstd[GROUPS] = {0};
+    int n = 0, stillN = 0, gstd[GROUPS] = {0}, gm[GROUPS] = {0};
     float mean = 0, mstd = 0, motion = 0, rssiMean = 0, rssiSd = 0, still = -1.0f;
 
     if (xSemaphoreTake(g_mux, portMAX_DELAY) == pdTRUE)
@@ -237,8 +237,9 @@ void publish()
             float tot = 0;
             for (int g = 0; g < GROUPS; g++)
             {
-                const float gm = sg[g] / n, v = sg2[g] / n - gm * gm;
+                const float gm_ = sg[g] / n, v = sg2[g] / n - gm_ * gm_;
                 gstd[g] = (int)lroundf(sqrtf(v > 0 ? v : 0) * 1000.0f);
+                gm[g] = (int)lroundf(gm_ * 1000.0f); // channel shape: what a still body changes
                 tot += gstd[g];
             }
             motion = tot / GROUPS;
@@ -267,8 +268,9 @@ void publish()
 
     const int ok = (g_running && n >= CSI_MIN_N) ? 1 : 0;
     if (!ok)
-        mean = mstd = motion = rssiMean = rssiSd = 0, still = -1.0f, memset(gstd, 0, sizeof(gstd));
-    char buf[384];
+        mean = mstd = motion = rssiMean = rssiSd = 0, still = -1.0f, memset(gstd, 0, sizeof(gstd)),
+        memset(gm, 0, sizeof(gm));
+    char buf[448];
     int len = snprintf(buf, sizeof(buf),
                        "{\"on\":%d,\"ok\":%d,\"n\":%d,\"mean\":%.1f,\"motion\":%.1f,\"mstd\":%.1f,"
                        "\"still\":%.1f,\"still_n\":%d,\"gstd\":[",
@@ -276,11 +278,16 @@ void publish()
                        finiteOr(still, -1), stillN);
     for (int g = 0; g < GROUPS && len > 0 && len < (int)sizeof(buf); g++)
         len += snprintf(buf + len, sizeof(buf) - len, "%s%d", g ? "," : "", gstd[g]);
+    // v2: gm = mean normalised group amplitude x1000 over the window (1000 = flat channel).
+    if (len > 0 && len < (int)sizeof(buf)) len += snprintf(buf + len, sizeof(buf) - len, "],\"v\":2,\"gm\":[");
+    for (int g = 0; g < GROUPS && len > 0 && len < (int)sizeof(buf); g++)
+        len += snprintf(buf + len, sizeof(buf) - len, "%s%d", g ? "," : "", gm[g]);
     if (len < 0 || len >= (int)sizeof(buf)) return; // never publish broken JSON
-    snprintf(buf + len, sizeof(buf) - len,
+    const int tail = snprintf(buf + len, sizeof(buf) - len,
              "],\"rssi\":%.1f,\"rssi_sd\":%.1f,\"heap\":%u,\"up\":%lu,\"rr\":\"%s\"}",
              finiteOr(rssiMean, 0), finiteOr(rssiSd, 0), (unsigned)ESP.getFreeHeap(),
              (unsigned long)(now / 1000), g_rr);
+    if (tail < 0 || tail >= (int)sizeof(buf) - len) return; // truncated: never publish broken JSON
     g_publish(g_topic, buf, false);
 }
 } // namespace
