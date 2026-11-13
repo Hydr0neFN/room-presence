@@ -402,3 +402,21 @@ class ZoneLogAndScoreTests(unittest.TestCase):
         self.assertEqual(__import__("csi_replay").metrics(sc["ALL"]["ble_fp_vs_weak_same_rows"])[1], 0.0)
         sc = cs.score(rows, min_conf=0.3)
         self.assertEqual(__import__("csi_replay").metrics(sc["ALL"]["csi_vs_weak"])[0], 8)
+
+
+class TopicPrefixTests(unittest.TestCase):
+    def test_topic_prefix_from_env(self):
+        import importlib
+        old = os.environ.get("CSI_TOPIC_PREFIX")
+        try:
+            os.environ["CSI_TOPIC_PREFIX"] = "presence/csi_shadow"
+            m = importlib.reload(svc)
+            self.assertEqual((m.T_STATE, m.T_AGREE, m.T_AVAIL),
+                             ("presence/csi_shadow/state", "presence/csi_shadow/agreement",
+                              "presence/csi_shadow/availability"))
+        finally:
+            if old is None:
+                os.environ.pop("CSI_TOPIC_PREFIX", None)
+            else:
+                os.environ["CSI_TOPIC_PREFIX"] = old
+            importlib.reload(svc)

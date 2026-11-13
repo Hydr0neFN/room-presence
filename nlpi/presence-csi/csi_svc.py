@@ -41,7 +41,8 @@ CTX_STALE_S = 90
 RING_LEN = 8640         # 24 h of 10 s windows
 KEEP_DAYS = 14
 SAVE_EVERY_S = 600
-T_STATE, T_AGREE, T_AVAIL = "presence/csi/state", "presence/csi/agreement", "presence/csi/availability"
+CSI_TOPIC_PREFIX = os.environ.get("CSI_TOPIC_PREFIX", "presence/csi")
+T_STATE, T_AGREE, T_AVAIL = CSI_TOPIC_PREFIX + "/state", CSI_TOPIC_PREFIX + "/agreement", CSI_TOPIC_PREFIX + "/availability"
 EXTRA = ("rssi", "rssi_sd", "mstd")
 
 
@@ -389,7 +390,7 @@ def run_mqtt():
         for t in ("presence/+/csi", "presence/zone/state", "presence/calibrate/status", "presence/calibrate/cmd",
                   "presence/label/event"):
             cl.subscribe(t, qos=1)
-        for oid, cfg in DISCOVERY.items():
+        for oid, cfg in (DISCOVERY.items() if CSI_TOPIC_PREFIX == "presence/csi" else ()):
             body = dict(cfg, availability_topic=T_AVAIL)   # no device block: the entity_id must stay sensor.rp_csi_*
             cl.publish("homeassistant/sensor/%s/config" % oid, json.dumps(body), qos=1, retain=True)
         cl.publish(T_AVAIL, "online", qos=1, retain=True)

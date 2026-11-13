@@ -1,0 +1,16 @@
+[Unit]
+Description=Presence tracker (fused zone estimate from the zone log -> sensor.rp_csi_zone)
+After=mosquitto.service zone-log.service
+
+[Service]
+EnvironmentFile=/etc/presence-ble.env
+Environment=ZONELOG_DIR=/var/lib/zone-log
+Environment=TRACK_DIR=/var/lib/presence-track
+WorkingDirectory=/opt/presence-track
+ExecStart=/usr/bin/python3 /opt/presence-track/tracker_svc.py
+Restart=always
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
