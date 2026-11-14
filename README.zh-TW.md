@@ -109,5 +109,6 @@ py -3.13 calibrate.py --zone bed
 - [Home Assistant 與資料紀錄](docs/home-assistant.zh-TW.md) - 實體、IRK、校正服務、標註網站、zone log、power log。
 - [既有方案](docs/prior-art.zh-TW.md) - 讀過什麼、還有什麼沒抄進來。
 
-## 授權
-這個 repo 沒有 LICENSE 檔案。
+## 授權
+
+MIT License，詳見 [LICENSE](LICENSE)。

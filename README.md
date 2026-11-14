@@ -109,5 +109,6 @@ Node firmware, OTA routes and build dirs: [Firmware and nodes](docs/firmware.md)
 - [Home Assistant and data logs](docs/home-assistant.md) - entities, IRK, calibration service, label site, zone log, power log.
 - [Prior art](docs/prior-art.md) - what was read and what was not copied yet.
 
-## License
-No LICENSE file in this repo.
+## License
+
+MIT License. See [LICENSE](LICENSE).
