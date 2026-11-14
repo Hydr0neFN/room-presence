@@ -198,11 +198,28 @@ class TrackerTests(unittest.TestCase):
         self.assertGreater(res["post"]["bed"], res["post"]["kitchen"])
         self.assertLess(res["post"]["bed"], tr.SWITCH_CONF)
         self.assertEqual(res["zone"], "kitchen")
-        self.assertEqual(res["confidence"], res["post"]["kitchen"])
+        self.assertEqual(res["held"], 1)
+        self.assertGreaterEqual(res["confidence"], tr.HELD_CONF)
         for _ in range(3):
             res = t.step(simple_row(w="5.0"))        # clear evidence
         self.assertGreaterEqual(res["post"]["bed"], tr.SWITCH_CONF)
         self.assertEqual(res["zone"], "bed")
+        self.assertEqual(res["held"], 0)
+
+    def test_held_zone_reports_floor_confidence_and_gives_up_after_held_max(self):
+        model = {"kitchen": {"w_cyd": (0.0, 1.0)}, "bed": {"w_cyd": (5.0, 1.0)}, "pc_desk": {"w_cyd": (5.2, 1.0)}}
+        t = tr.Tracker(model)
+        seen = []
+        for i in range(tr.HELD_MAX + 1):
+            t.zone = "kitchen" if i == 0 else t.zone
+            t.post = {"kitchen": 0.05, "bed": 0.48, "pc_desk": 0.47}   # nobody reaches SWITCH_CONF, kitchen is gone
+            res = t.step(simple_row(w="5.1"))
+            self.assertLess(max(res["post"].values()), tr.SWITCH_CONF)
+            seen.append(res["zone"])
+            if res["zone"] == "kitchen":
+                self.assertEqual(res["confidence"], tr.HELD_CONF)   # floor: HA keeps the held zone
+        self.assertEqual(seen[:tr.HELD_MAX], ["kitchen"] * tr.HELD_MAX)
+        self.assertNotEqual(seen[-1], "kitchen")                    # the hold is limited: no stuck zone
 
     def test_away_row_keeps_posterior(self):
         t = tr.Tracker(two_zone_model())

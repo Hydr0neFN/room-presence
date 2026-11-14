@@ -48,6 +48,8 @@ BURST_REL = 0.25         # burst threshold: median * (1 + REL)
 BURST_ABS = 3.0          # burst threshold: median + ABS (raw motion units)
 BURST_NEED = 2           # nodes that must burst in the same row to reset the stay probability
 SWITCH_CONF = 0.7        # the reported zone changes only when the new zone's posterior reaches this (a clamp always wins)
+HELD_MAX = 12            # ... or after this many rows (2 min) with another zone ahead; a held zone reports >= HELD_CONF
+HELD_CONF = 0.15         # confidence floor of a held zone (= HA rp_csi_min_conf, so HA keeps it instead of the BLE fallback)
 CLAMP_EPS = 1e-4         # posterior of the other zones on a weak-rule clamp
 POST_FLOOR = 1e-6        # lowest stored posterior value
 SEED_VAR_MULT = 1.5      # seed variance before a feature has MIN_N seed values
@@ -220,6 +222,7 @@ class Tracker:
         self.since = 10 ** 6
         self.burst = Burst()
         self.zone = None     # reported zone (sticky, see SWITCH_CONF)
+        self.held = 0        # rows the reported zone has been held against another winner
 
     def step(self, row):
         """One zone-log row -> zone, confidence, posterior, burst state, clamp, feature count, weak label, away flag."""
@@ -255,9 +258,16 @@ class Tracker:
         self.post = post
         top = max(zones, key=lambda z: post[z])
         if self.zone not in post or clamp or post[top] >= SWITCH_CONF:
-            self.zone = top   # a weak, short-lived winner (turning over in bed) does not move the reported zone
+            self.zone, self.held = top, 0
+        elif top != self.zone:
+            self.held += 1    # a weak, short-lived winner (turning over in bed) does not move the reported zone
+            if self.held > HELD_MAX:
+                self.zone, self.held = top, 0
+        else:
+            self.held = 0
         zone = self.zone
-        return {"zone": zone, "confidence": round(post[zone], 3), "post": {z: round(post[z], 3) for z in zones},
+        conf = post[zone] if zone == top else max(post[zone], HELD_CONF)
+        return {"zone": zone, "confidence": round(conf, 3), "held": self.held, "post": {z: round(post[z], 3) for z in zones},
                 "burst": burst, "since_burst_s": self.since * 10, "clamp": clamp, "n_features": nfeat,
                 "weak": weak, "away": False}
 

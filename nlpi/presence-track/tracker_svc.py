@@ -132,7 +132,7 @@ class Service:
         self.tracker = tr.Tracker(model)
         self.tracker.burst = old.burst
         self.tracker.since = old.since
-        self.tracker.zone = old.zone if old.zone in model else None
+        self.tracker.zone, self.tracker.held = (old.zone, old.held) if old.zone in model else (None, 0)
         vals = {z: old.post.get(z, 0.0) for z in model}
         tot = sum(vals.values())
         if tot > 0:
@@ -175,7 +175,7 @@ class Service:
     # ------------------------------------------------------------- the 10 s tick
     def payload(self, row, res, now):
         return {"zone": res["zone"], "confidence": res["confidence"], "ts": int(now), "post": res["post"],
-                "burst": res["burst"], "since_burst_s": res["since_burst_s"], "clamp": res["clamp"],
+                "burst": res["burst"], "since_burst_s": res["since_burst_s"], "clamp": res["clamp"], "held": res.get("held", 0),
                 "n_features": res["n_features"], "weak_label": res["weak"], "row_ts": row.get("ts"),
                 "engine": "track-v1", "training": self.info, "trained_at": self.trained_at}
 
