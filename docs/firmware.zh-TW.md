@@ -14,7 +14,7 @@
 - 平台鎖版：現在的 pioarduino 平台（Arduino 3.3.9）基準就 1.196 MB，BLE 已經塞不進 1.25 MB 的 OTA 分割區（1.375 MB）。`platformio.ini` 鎖 `espressif32@6.9.0`（Arduino 2.0.17），PlatformIO core 目錄獨立成 `C:\pio-lb`。從 PowerShell／cmd 建置（不要用 Git Bash）：`$env:PLATFORMIO_CORE_DIR='C:\pio-lb'; pio run -e esp32-c3-pro-mini-ota`。
 - review 時發現的取捨：WiFi 的 modem sleep 一關，WiFi／BT 共存就會 abort，所以這個版本用 `WIFI_PS_MIN_MODEM`，不用 `setSleep(false)`；這條分支上等於把之前修 ping jitter／MQTT 重連的改動撤掉了。燒錄後注意 MQTT 重連次數；如果明顯變多，對 `presence/pcdesk/cmd` 下 `off` 或回滾。
 - 保險：OTA 比 BLE 先初始化；panic／WDT 重置後的下一次開機跳過 BLE；free heap 低於 40 kB 時掃描器停，回到 50 kB 以上才重啟。
-- 映像檔（已 gitignore，含密鑰）：`<user-home>\Rpi4\room-presence\firmware\lightbar2mqtt-ble-presence.bin`（sha256 如上）。回滾 `...\rollback\lightbar2mqtt-baseline-HEAD69893a0-core2.0.17.bin`（907,968 B，sha256 146e0cca...）。注意：燈條現在跑的是九月 6 日建的版本；回滾 bin 用同一份原始碼重建，重建出來的位元跟現在跑的不一樣。
+- 映像檔（已 gitignore，含密鑰）：`<user-home>\Rpi4\room-presence\firmware\lightbar2mqtt-ble-presence.bin`（sha256 如上）。回滾 `...\rollback\lightbar2mqtt-baseline-HEAD69893a0-core2.0.17.bin`（907,968 B，sha256 146e0cca...）。注意：燈條現在跑的是9 月 6 日建的版本；回滾 bin 用同一份原始碼重建，重建出來的位元跟現在跑的不一樣。
 - OTA（PowerShell；環境變數 `LIGHTBAR_OTA_PASSWORD` = config.h 裡的 OTA_PASSWORD；防火牆規則 TCP 3233 見 platformio.ini 註解）：
   ```
   cd <user-home>\Rpi4\lightbar2mqtt

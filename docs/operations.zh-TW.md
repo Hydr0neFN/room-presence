@@ -30,7 +30,7 @@ CYD 的代價，屋主看到的：LVGL 繪圖緩衝從 64 行降到 24 行（省
 - workdesk（LightController，RSSI 平均 -73.6 dBm，最弱的一條 link；從 `<server>` ping 平均 25 ms／最大 66 ms，kitchenradar 只要 8 ms）：斷線時段 10-27 21:53-22:14、22:49-23:09，10-28 02:40-04:01 UTC（本地 +1 小時）、07:17-07:30，還有更短的；`light.channel_b`（同一塊板上的 HomeKit 燈）在同樣的時段也不可用，ESPHome 的 kitchenradar／neopixel 從來沒斷，其他 presence 節點也正常。所以是整塊板子離開網路，不只 presence 資料流；這個問題在 presence 韌體之前就有（屋主）。目前還分不出是重開機還是 Wi-Fi 掉線：新加的感測器 `sensor.rp_<node>_uptime`（來自 `/ble` 狀態）會在下一次斷線時給答案（uptime 重置 = 重開機，沒重置 = 關聯掉線）。`tools/q_wd.py` 會列出斷線時段。如果確認是關聯掉線，候選修法：workdesk 的天線／位置、TP-Link AX10 的 2.4 GHz 頻道（先匯出備份，一次只改一項）。
   - 2026-11-02 23:25 改天線（31 mm 線、15 mm 環，環朝上）：HA 可用率 87 % -> ~100 %，RSSI ~-81 dBm（原廠天線常常根本連不上，有一次離線 8 h）。
   - 只有這塊板子調低 CSI `ok` 門檻：`CSI_MIN_N=4`（`csi/csi_presence.cpp` 預設 8）；在 -81 dBm 下 n 大多是 0-7（改之前的 120 s：n>=4 佔 29 %，n>=8 佔 0 %）。
-- 只用 CSI 的分區準確率（`tools/fp_eval.py cv analysis/data/export.csv --cv visits --purge-s 15`，85 筆人工標註、4 個區域、leave-one-visit-out）：只用 BLE 0.82；CSI 權重加到 w = 6 dB 時 0.48（只用 motion 特徵 0.62）；以目前的特徵，單靠 CSI 明顯比 BLE 差。Roadmap「CSI-first」：在每個區域重錄 CSI 特徵，人分別站著不動和走動，用節點自己的空房基準做正規化（ratio 特徵在廚房表現較好），權重交給 CV 決定而不是手調，之後才把 `rp_feat_weight_db` 從 0 往上加。
+- 只用 CSI 的分區準確率（`tools/fp_eval.py cv analysis/data/export.csv --cv visits --purge-s 15`，85 筆人工標註、4 個區域、leave-one-visit-out）：只用 BLE 0.82；CSI 權重加到 w = 6 dB 時 0.48（只用 motion 特徵 0.62）；以目前的特徵，單靠 CSI 明顯比 BLE 差。Roadmap「CSI-first」：在每個區域重錄 CSI 特徵，人分別站著不動和走動，用節點自己的空房基準做正規化（ratio 特徵在廚房表現較好），權重交給 CV 決定，不手調，之後才把 `rp_feat_weight_db` 從 0 往上加。
 - 既有方案：見[既有方案](prior-art.zh-TW.md)。
 
 ## 回滾

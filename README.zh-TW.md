@@ -9,7 +9,7 @@
 | | |
 |---|---|
 | **問題** | 房間裡的人在哪一區：kitchen、work desk、PC desk、bed、home（位置不明）、away。 |
-| **做出來的東西** | 兩類第一級訊號在 HA（`ha/room_presence.yaml`）裡用最近鄰校正指紋融合：一種是量 WiFi（CSI 加 link RSSI），人身上不用帶裝置；另一種是各錨點收到屋主手機的 BLE RSSI。 |
+| **做出來的東西** | 兩類主要訊號在 HA（`ha/room_presence.yaml`）裡用最近鄰校正指紋融合：一種是量 WiFi（CSI 加 link RSSI），人身上不用帶裝置；另一種是各錨點收到屋主手機的 BLE RSSI。 |
 | **結果** | HA 裡的 `sensor.yui_room_zone`。分區準確率：只用 BLE 0.82，只用 CSI 0.48（只取 motion 特徵 0.62）：85 筆人工標註、4 個區域、leave-one-visit-out。 |
 | **技術堆疊** | ESP32-C3（lightbar2mqtt、LightController、powermon）、NLDeskCYD ESP32 面板、ESPHome D1 mini、Raspberry Pi、Home Assistant、MQTT。 |
 
@@ -30,7 +30,7 @@ PC idle ---------+                                nearest fingerprint
 - HA 選 RMS 距離最小的區域（BLE 以 dB 計，特徵以 sigma 乘 `input_number.rp_feat_weight_db` 計，預設 6 dB；缺的特徵跳過）。
 
 ## 設計
-兩類第一級訊號，在 HA（`ha/room_presence.yaml`）裡用最近鄰校正指紋融合：
+兩類主要訊號，在 HA（`ha/room_presence.yaml`）裡用最近鄰校正指紋融合：
 1. 量 WiFi，人身上不用帶任何裝置。
    - CSI：每個錨點 ESP32 以約 20 Hz 對 gateway 發 ping，讀回覆中每個子載波的通道振幅（L-LTF），把 1 秒的摘要（motion、still、mean、rssi、rssi_sd、n、ok）以約 2 Hz 發到 `presence/<node>/csi`。有人在房裡移動就會擾動通道；HA 的統計感測器 `sensor.rp_link_<node>_motion` 是 `motion` 的 10 秒平均（千分比）。
    - Link RSSI：ESPHome 的 kitchenradar 與 NeoPixel 每 1 秒發一次 WiFi RSSI；`sensor.rp_link_kitchenradar_motion` / `_neopixel_motion` 是 20 秒標準差（dB）。
