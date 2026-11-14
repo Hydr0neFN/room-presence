@@ -18,6 +18,7 @@ stores its rows as seeds in that file. Env: MQTT_* (presence-ble.env), ZONELOG_D
 import json
 import os
 import sys
+import threading
 import time
 
 import tracker as tr
@@ -131,6 +132,7 @@ class Service:
         self.tracker = tr.Tracker(model)
         self.tracker.burst = old.burst
         self.tracker.since = old.since
+        self.tracker.zone = old.zone if old.zone in model else None
         vals = {z: old.post.get(z, 0.0) for z in model}
         tot = sum(vals.values())
         if tot > 0:
@@ -210,6 +212,7 @@ class Service:
 def run_mqtt():
     import paho.mqtt.client as mqtt
     svc = Service()
+    lock = threading.Lock()   # the MQTT thread (refit, calibration seeds) and the tick loop share svc
     c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id="presence_track") if hasattr(mqtt, "CallbackAPIVersion") \
         else mqtt.Client(client_id="presence_track")
     c.username_pw_set(os.environ["MQTT_USER"], os.environ["MQTT_PASS"])
@@ -227,10 +230,11 @@ def run_mqtt():
         now = time.time()
         try:
             p = json.loads(m.payload)
-            if m.topic == T_CMD:
-                svc.on_cmd(p, now)
-            elif m.topic == T_CAL:
-                svc.on_cal_status(p, now)
+            with lock:
+                if m.topic == T_CMD:
+                    svc.on_cmd(p, now)
+                elif m.topic == T_CAL:
+                    svc.on_cal_status(p, now)
         except Exception as e:   # noqa: BLE001 - a bad message must not kill the callback
             log("message %s: %s" % (m.topic, e))
 
@@ -243,7 +247,8 @@ def run_mqtt():
             time.sleep(max(0.5, PERIOD_S - (now % PERIOD_S) + 3))   # wall-clock 10 s grid + 3 s for the new zone-log row
             now = time.time()
             try:
-                p = svc.tick(now)
+                with lock:
+                    p = svc.tick(now)
                 if p is not None:
                     c.publish(T_STATE, json.dumps(p), qos=0, retain=True)
             except Exception as e:   # noqa: BLE001 - log one line and keep the loop alive

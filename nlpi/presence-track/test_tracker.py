@@ -189,6 +189,21 @@ class TrackerTests(unittest.TestCase):
         self.assertEqual(res["zone"], "pc_desk")
         self.assertIsNone(res["clamp"])
 
+    def test_reported_zone_is_sticky_below_switch_conf(self):
+        t = tr.Tracker(two_zone_model())
+        for _ in range(40):
+            t.step(simple_row(w="0.0"))
+        t.step(simple_row(w="2.5", motion="600"))    # burst: the transition matrix opens
+        res = t.step(simple_row(w="2.8"))            # bed wins, but only just
+        self.assertGreater(res["post"]["bed"], res["post"]["kitchen"])
+        self.assertLess(res["post"]["bed"], tr.SWITCH_CONF)
+        self.assertEqual(res["zone"], "kitchen")
+        self.assertEqual(res["confidence"], res["post"]["kitchen"])
+        for _ in range(3):
+            res = t.step(simple_row(w="5.0"))        # clear evidence
+        self.assertGreaterEqual(res["post"]["bed"], tr.SWITCH_CONF)
+        self.assertEqual(res["zone"], "bed")
+
     def test_away_row_keeps_posterior(self):
         t = tr.Tracker(two_zone_model())
         t.step(simple_row(w="0.0"))

@@ -47,6 +47,7 @@ BURST_K = 4.0            # burst threshold: median + K * MAD
 BURST_REL = 0.25         # burst threshold: median * (1 + REL)
 BURST_ABS = 3.0          # burst threshold: median + ABS (raw motion units)
 BURST_NEED = 2           # nodes that must burst in the same row to reset the stay probability
+SWITCH_CONF = 0.7        # the reported zone changes only when the new zone's posterior reaches this (a clamp always wins)
 CLAMP_EPS = 1e-4         # posterior of the other zones on a weak-rule clamp
 POST_FLOOR = 1e-6        # lowest stored posterior value
 SEED_VAR_MULT = 1.5      # seed variance before a feature has MIN_N seed values
@@ -208,7 +209,9 @@ class Burst:
 
 
 class Tracker:
-    """Motion-gated HMM over the model's zones. post survives away rows; a burst only opens the transition matrix."""
+    """Motion-gated HMM over the model's zones. post survives away rows; a burst only opens the transition matrix.
+
+    The reported zone is sticky: it follows the posterior's winner only at SWITCH_CONF or on a clamp."""
 
     def __init__(self, model):
         self.model = model
@@ -216,6 +219,7 @@ class Tracker:
         self.post = {z: 1.0 / len(zones) for z in zones} if zones else {}
         self.since = 10 ** 6
         self.burst = Burst()
+        self.zone = None     # reported zone (sticky, see SWITCH_CONF)
 
     def step(self, row):
         """One zone-log row -> zone, confidence, posterior, burst state, clamp, feature count, weak label, away flag."""
@@ -249,7 +253,10 @@ class Tracker:
         tot = sum(po.values())
         post = {z: max(po[z] / tot, POST_FLOOR) for z in zones} if tot > 0 else {z: 1.0 / n for z in zones}
         self.post = post
-        zone = max(zones, key=lambda z: post[z])
+        top = max(zones, key=lambda z: post[z])
+        if self.zone not in post or clamp or post[top] >= SWITCH_CONF:
+            self.zone = top   # a weak, short-lived winner (turning over in bed) does not move the reported zone
+        zone = self.zone
         return {"zone": zone, "confidence": round(post[zone], 3), "post": {z: round(post[z], 3) for z in zones},
                 "burst": burst, "since_burst_s": self.since * 10, "clamp": clamp, "n_features": nfeat,
                 "weak": weak, "away": False}
