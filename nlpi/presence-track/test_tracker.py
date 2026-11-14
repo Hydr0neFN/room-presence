@@ -328,6 +328,49 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(len(saved["cal"]["kitchen"]), 4)
 
 
+class TailTests(unittest.TestCase):
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self._td.name, "zone-v3-2026-11-14.csv")
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def rows(self, n, start=0):
+        return [make_row(random.Random(40 + i), "kitchen", ts=iso(epoch("2026-11-14T10:00:00") + 10 * i))
+                for i in range(start, start + n)]
+
+    def test_reads_only_appended_complete_rows(self):
+        t = tr.Tail()
+        self.assertEqual(t.read(self.path), [])                # missing file
+        write_rows(self.path, self.rows(3))
+        got = t.read(self.path)
+        self.assertEqual([r["ts"] for r in got], [r["ts"] for r in tr.load_rows(self.path)])
+        self.assertIn("_t", got[0])
+        self.assertEqual(t.read(self.path), [])                # nothing new
+        write_rows(self.path, self.rows(5))                    # same 3 rows + 2 more
+        full = tr.load_rows(self.path)
+        with open(self.path, "ab") as f:
+            f.write(b"2026-11-14T11:00:00,kit")                # a row that is still being written
+        got = t.read(self.path)
+        self.assertEqual([r["ts"] for r in got], [r["ts"] for r in full[3:]])
+        self.assertEqual(tr.features(got[0]), tr.features(full[3]))
+        self.assertEqual(t.read(self.path), [])
+        with open(self.path, "ab") as f:
+            f.write(b"chen\n")
+        self.assertEqual([r["ts"] for r in t.read(self.path)], ["2026-11-14T11:00:00"])
+
+    def test_restarts_on_a_shorter_file_and_on_a_new_path(self):
+        t = tr.Tail()
+        write_rows(self.path, self.rows(4))
+        self.assertEqual(len(t.read(self.path)), 4)
+        write_rows(self.path, self.rows(1, start=7))           # the file became shorter
+        self.assertEqual(len(t.read(self.path)), 1)
+        other = self.path.replace("11-14", "11-15")
+        write_rows(other, self.rows(2))
+        self.assertEqual(len(t.read(other)), 2)
+
+
 class SeedFileTests(unittest.TestCase):
     def test_roundtrip_and_add_replace(self):
         with tempfile.TemporaryDirectory() as d:

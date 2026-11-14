@@ -281,14 +281,56 @@ def load_rows(path):
         return rows
     with fh:
         for r in csv.DictReader(fh):
-            dt = parse_ts(r.get("ts"))
-            if dt is None:
-                continue
-            r["_t"] = time.mktime(dt.timetuple())
-            r["_day"] = r["ts"][:10]
-            r["_hour"] = dt.hour
-            rows.append(r)
+            if finish_row(r):
+                rows.append(r)
     return rows
+
+
+def finish_row(r):
+    """Add _t / _day / _hour to one CSV row dict; False when its ts cannot be parsed."""
+    dt = parse_ts(r.get("ts"))
+    if dt is None:
+        return False
+    r["_t"] = time.mktime(dt.timetuple())
+    r["_day"] = r["ts"][:10]
+    r["_hour"] = dt.hour
+    return True
+
+
+class Tail:
+    """Incremental reader of one growing zone log file: read() -> the rows appended since the last call.
+
+    Only complete lines are consumed, so a row that is being written is picked up by the next call. A new path or a
+    file that became shorter (rotation, rewrite) starts again at the header.
+    """
+
+    def __init__(self):
+        self.path, self.pos, self.fields = None, 0, None
+
+    def read(self, path):
+        if path != self.path:
+            self.path, self.pos, self.fields = path, 0, None
+        try:
+            fh = open(path, "rb")
+        except OSError:
+            return []
+        with fh:
+            if os.fstat(fh.fileno()).st_size < self.pos:
+                self.pos, self.fields = 0, None
+            fh.seek(self.pos)
+            data = fh.read()
+        end = data.rfind(b"\n") + 1
+        if end == 0:
+            return []
+        self.pos += end
+        lines = data[:end].decode("utf-8", "replace").splitlines()
+        if self.fields is None:
+            self.fields = next(csv.reader(lines[:1]), None) or None
+            lines = lines[1:]
+            if self.fields is None:
+                self.pos = 0
+                return []
+        return [r for r in csv.DictReader(lines, fieldnames=self.fields) if finish_row(r)]
 
 
 def list_days(logdir):

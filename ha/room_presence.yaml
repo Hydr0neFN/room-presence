@@ -1133,7 +1133,8 @@ template:
       #   prev pc_desk, PC unlocked, idle < 300 s, no radar -> pc_desk   (hold: a pause at the PC is not leaving it)
       #   kitchen radar hint (held 30 s)         -> kitchen
       #   bathroom radar hint (held 30 s; only when rp_bathroom_radar_min_cm > 0) -> bathroom
-      #   no node hears the phone (< floor)      -> home
+      #   no node hears the phone (< floor)      -> home   (not while CSI says bed with confidence >= 0.7: the phone
+      #                                             on the charger drops out for minutes at night; CSI then gives bed)
       #   CSI zone (rp_csi_lead on, age <= rp_csi_stale_s, confidence >= rp_csi_min_conf, zone in the 5 classes)
       #                                          -> that zone (a CSI work_desk / pc_desk is overridden by the night bed rule)
       #   night bed rule                         -> bed
@@ -1179,7 +1180,7 @@ template:
           {% elif prev == 'pc_desk' and pc_unlocked and idle < 300 and not kitchen and not bath %}{% set ns.z = 'pc_desk' %}
           {% elif kitchen %}{% set ns.z = 'kitchen' %}
           {% elif bath %}{% set ns.z = 'bathroom' %}
-          {% elif [a, b, c, d, e] | max < floor %}{% set ns.z = 'home' %}
+          {% elif [a, b, c, d, e] | max < floor and not (csi_ok and cz == 'bed' and cc >= 0.7) %}{% set ns.z = 'home' %}
           {% elif csi_ok and not (nbed and cz in ['work_desk', 'pc_desk']) %}{% set ns.soft = not (nbed and cz == 'bed') %}{% set ns.z = cz %}
           {% elif nbed %}{% set ns.z = 'bed' %}
           {% elif fp not in ['none', 'unknown', 'unavailable'] %}
@@ -1239,7 +1240,7 @@ template:
           {% elif z == 'pc_desk' and pc_unlocked and idle < 300 and not kitchen and not bath %}{% set key = 'pc_hold' %}
           {% elif kitchen %}{% set key = 'kitchen_radar' %}
           {% elif bath %}{% set key = 'bathroom_radar' %}
-          {% elif mx < floor %}{% set key = 'phone_unheard' %}
+          {% elif mx < floor and not (csi_ok and cz == 'bed' and cc >= 0.7) %}{% set key = 'phone_unheard' %}
           {% elif csi_ok and not (nbed and cz in ['work_desk', 'pc_desk']) %}{% set key = 'csi' %}
           {% elif nbed %}{% set key = 'night_bed' %}
           {% endif %}
@@ -1274,7 +1275,7 @@ template:
             {% elif z == 'pc_desk' and pc_unlocked and idle < 300 and not kitchen and not bath %}{% set key = 'pc_hold' %}
             {% elif kitchen %}{% set key = 'kitchen_radar' %}
             {% elif bath %}{% set key = 'bathroom_radar' %}
-            {% elif mx < floor %}{% set key = 'phone_unheard' %}
+            {% elif mx < floor and not (csi_ok and cz == 'bed' and cc >= 0.7) %}{% set key = 'phone_unheard' %}
             {% elif csi_ok and not (nbed and cz in ['work_desk', 'pc_desk']) %}{% set key = 'csi' %}
             {% elif nbed %}{% set key = 'night_bed' %}
             {% endif %}

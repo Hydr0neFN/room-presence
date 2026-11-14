@@ -868,6 +868,16 @@ class TestA5(unittest.TestCase):
                 z, r = run(CAND, fx, this_zone("work_desk", 600), new=new_uids())
                 self.assertEqual(z, state)
                 self.assertEqual(r, "csi")
+        # A5.1c (2026-11-14): phone unheard + CSI bed >= 0.7 -> bed / csi; below 0.7 or another CSI zone -> home / phone_unheard
+        for state, conf, zone, rule in (("bed", 0.7, "bed", "csi"), ("bed", 1.0, "bed", "csi"),
+                                        ("bed", 0.69, "home", "phone_unheard"), ("work_desk", 1.0, "home", "phone_unheard"),
+                                        ("bathroom", 1.0, "home", "phone_unheard")):
+            for night in ("off", "on"):
+                with self.subTest(deaf=state, conf=conf, night=night):
+                    fx = merge(base(), csi_ok(state=state, confidence=conf), SIG["deaf"], NIGHT[night])
+                    z, r = run(CAND, fx, this_zone("bed", 600), new=new_uids())
+                    self.assertEqual(z, zone)
+                    self.assertEqual(r, rule)
 
     def test_kitchen_fp_needs_evidence_on_fallback(self):
         # A5.2
