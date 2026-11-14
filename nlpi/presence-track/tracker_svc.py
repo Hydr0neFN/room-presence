@@ -80,6 +80,7 @@ class Service:
             self.model, self.info = {}, {}
         self.tracker = tr.Tracker(self.model)
         self.last_ts = None
+        self.tail = tr.Tail()    # today's file is read from the last offset, not from the start, on every tick
         self.last_refit_day = None
         self.cal = {"state": "idle", "zone": None, "rows": []}
         self._warm(now)
@@ -189,7 +190,7 @@ class Service:
 
     def _tick(self, now):
         self._maybe_refit(now)
-        rows = tr.load_rows(self._today_path(now))
+        rows = self.tail.read(self._today_path(now))
         last = None
         for row in rows:
             if self.last_ts is not None and row["ts"] <= self.last_ts:
